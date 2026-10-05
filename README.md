@@ -12,7 +12,7 @@
 https://github.com/itxiaohui66/astrbot_plugin_tixing
 ```
 
-也可以从 [GitHub Releases](https://github.com/itxiaohui66/astrbot_plugin_tixing/releases/latest) 下载 `astrbot_plugin_tixing-v1.2.0.zip`，在插件页上传安装。手动安装时，把 ZIP 中的 `astrbot_plugin_tixing` 文件夹解压到 AstrBot 的 `data/plugins/` 下，然后重启或重载插件。运行文件 `main.py`、`metadata.yaml` 和 `_conf_schema.json` 必须直接位于该插件文件夹中。
+也可以从 [GitHub Releases](https://github.com/itxiaohui66/astrbot_plugin_tixing/releases/latest) 下载 `astrbot_plugin_tixing-v1.2.1.zip`，在插件页上传安装。手动安装时，把 ZIP 中的 `astrbot_plugin_tixing` 文件夹解压到 AstrBot 的 `data/plugins/` 下，然后重启或重载插件。运行文件 `main.py`、`metadata.yaml` 和 `_conf_schema.json` 必须直接位于该插件文件夹中。
 
 安装时 AstrBot 会读取 `requirements.txt` 安装 `tzdata`。配置默认采用北京时间 `Asia/Shanghai`；每人在每个群或私聊最多 10 个活跃提醒，每 30 秒扫描一次。确认机器人已经接入 QQ 官方适配器，群内使用 `@机器人 /tx help` 查看帮助。
 
@@ -102,7 +102,15 @@ v1.2.0 默认采用 **主动发送**。新群的 `GROUP_ADD_ROBOT` 事件到来�
 
 如需使用被动回复，可关闭 `proactive_reminders`。这时只有存在有效的近期用户消息和回复额度才投递，超出窗口则等待下一条同会话消息。群、频道、频道私信保守采用 4 分钟窗口，C2C 59 分钟；每条消息最多投递 3 条提醒，给命令回复和其他插件预留额度。回复上下文按平台、场景和目标隔离；重复事件不会刷新有效期或额度，受限时不会切换为主动发送。被动模式无法保证长时间后准点提醒。
 
-QQ 普通群使用 `<qqbot-at-user id="OpenID" />` 实现真正 @，频道使用频道成员 ID。群、C2C、频道、频道私信分别走对应 SDK 接口。插件自己的到期提醒使用普通文本，不要求 Markdown 模板；命令回复仍由 AstrBot 当前事件的配置发送。
+v1.2.1 修复官方群到期提醒把 `<qqbot-at-user id="OpenID" />` 原样显示的问题：群提醒改用 `msg_type=2`，将原生 @ 标签放入 `markdown.content`，由 QQ 渲染为可点击的 @ 用户。主动和被动投递均使用该格式，仍保留原本的发送权限和回复上下文。提醒内容中的 Markdown 标点作为普通文字显示，@ 标签单独放在正文开头。
+
+默认使用原生 Markdown。如果 QQ 返回“不允许发送原生 markdown”等错误，任务显示“等待 Markdown 配置”，保留并每 5 分钟重试，不会改回显示长串标签的普通文本消息。原生 Markdown 权限与群管理员的主动消息开关是两项不同设置；需在机器人应用中开通原生 Markdown，或配置已有的获批 Markdown 模板。
+
+使用模板时，在插件配置填写 `official_markdown_template_id`；模板正文应包含 `{{.content}}`，并将 `official_markdown_parameter` 设置为 `content`。如果模板的变量名是 `body`，则正文使用 `{{.body}}`，参数设置为 `body`。插件向该变量填入完整的 @ 标签、提醒内容及编号。开通能力或配置模板后，可 `/tx retry 编号` 立即重试。
+
+解析被 @ 成员时，官方群优先使用该成员的本群 `member_openid`，并统一消息段和原始标签里的别名；频道仍使用频道成员 ID。未提供昵称时，提醒正文不会把创建者 OpenID 当作昵称。群、C2C、频道、频道私信分别走对应 SDK 接口；私聊不发送 @ 标签，OneBot 继续发送原生 `at` 消息段。命令回复仍由 AstrBot 当前事件的配置发送。
+
+格式依据 [腾讯官方文本交互与 @ 协议](https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/trans/text-chain.md) 和 [Markdown 消息协议](https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/type/markdown.md)。客户端最终显示需在实际 QQ 环境确认。
 
 旧数据库里的数字 QQ 号/群号无法自动换算为官方 OpenID，所以本次迁移的是功能，没有修改或直接导入旧数据库。更换 QQ 应用或 AstrBot 平台 ID 时，原 OpenID/路由可能失效，需要重建对应提醒。备份时停止 AstrBot 后复制整个 `data/plugin_data/astrbot_plugin_tixing/`。
 
@@ -113,6 +121,8 @@ QQ 普通群使用 `<qqbot-at-user id="OpenID" />` 实现真正 @，频道使用
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `proactive_reminders` | `true` | 默认到点主动投递并提示群权限；关闭后使用被动回复 |
+| `official_markdown_template_id` | 空 | 官方群提醒默认原生 Markdown；应用不支持时填写已获批的模板 ID |
+| `official_markdown_parameter` | `content` | 模板中接收完整提醒正文的变量名，未填模板时忽略 |
 | `timezone` | `Asia/Shanghai` | IANA 时区 |
 | `max_per_user` | `10` | 当前会话每人最多活跃任务 |
 | `check_interval_seconds` | `30` | 扫描周期，最小 1 秒 |

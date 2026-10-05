@@ -1,5 +1,7 @@
 {
   "proactive_reminders": {"type": "bool", "description": "QQ 官方到点主动提醒", "hint": "默认开启；首次入群/使用提示管理员允许主动消息。关闭后使用有时效和额度限制的被动回复。v1.2 起替代旧 official_delivery_mode 配置。", "default": true},
+  "official_markdown_template_id": {"type": "string", "description": "官方群提醒 Markdown 模板 ID（可选）", "hint": "默认留空使用原生 Markdown，让 QQ 正确渲染 @。若应用不允许原生 Markdown，填入已获批的模板 ID，模板需使用 {{.content}} 等正文变量。", "default": ""},
+  "official_markdown_parameter": {"type": "string", "description": "提醒模板正文变量名", "hint": "填写模板中用于接收完整提醒正文的变量名，例如模板 {{.content}} 对应 content；未配置模板时忽略。", "default": "content"},
   "timezone": {"type": "string", "description": "提醒时区", "hint": "IANA 时区名称，默认北京时间；修改只影响新建提醒。", "default": "Asia/Shanghai"},
   "max_per_user": {"type": "int", "description": "每人在每个群/私聊最多活跃提醒数", "default": 10},
   "check_interval_seconds": {"type": "int", "description": "到期扫描间隔（秒）", "default": 30},

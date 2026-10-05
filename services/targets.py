@@ -18,20 +18,32 @@ async def resolve_target(event, args, store, scope):
     raw_data = field(raw, "raw_data", raw)
     mentions = field(raw, "mentions", None) or field(raw_data, "mentions", []) or []
     trusted = {}
+    aliases = {}
+    official_group = event.get_platform_name() in OFFICIAL and bool(
+        field(raw, "group_openid") or field(raw_data, "group_openid")
+    )
     for mention in mentions:
-        user = str(field(mention, "id", None) or field(mention, "member_openid", ""))
+        generic_id = str(field(mention, "id", "") or "")
+        member_id = str(field(mention, "member_openid", "") or "")
+        user = (member_id or generic_id) if official_group else (generic_id or member_id)
+        if user:
+            for value in (generic_id, member_id):
+                if value:
+                    aliases[value] = user
         if field(mention, "is_you", False) or field(mention, "bot", False):
-            bot_ids.add(user)
+            bot_ids.update({user, generic_id, member_id} - {""})
         elif user:
             trusted[user] = str(field(mention, "username", "") or "")
     for component in event.get_messages():
         if field(component, "type") in {"At", "at"} or type(component).__name__ == "At":
-            user = str(field(component, "qq", ""))
+            raw_user = str(field(component, "qq", ""))
+            user = aliases.get(raw_user, raw_user)
             if user and user not in bot_ids:
-                trusted[user] = str(field(component, "name", "") or "")
+                trusted[user] = trusted.get(user) or str(field(component, "name", "") or "")
     candidates = list(trusted)
     for match in MARKUP.finditer(args):
-        user = next(g for g in match.groups() if g is not None)
+        raw_user = next(g for g in match.groups() if g is not None)
+        user = aliases.get(raw_user, raw_user)
         if user not in bot_ids:
             candidates.append(user)
     args = MARKUP.sub(" ", args)
@@ -45,7 +57,9 @@ async def resolve_target(event, args, store, scope):
         if len(names) > 1:
             raise ValueError("被 @ 成员重名，请使用用户标识。")
         member = await store.member(scope, value)
-        candidates.append(names[0] if names else member["user_id"] if member else value)
+        candidates.append(
+            names[0] if names else member["user_id"] if member else aliases.get(value, value)
+        )
     args = TEXT_AT.sub(" ", args).strip()
     candidates = list(dict.fromkeys(candidates))
     if len(candidates) > 1:

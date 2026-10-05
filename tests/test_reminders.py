@@ -84,7 +84,8 @@ async def test_official_routes(platform_factory, scene, method, destination_key,
     assert kwargs[destination_key] == "group_1"
     assert "msg_id" not in kwargs
     if scene == "group":
-        assert '<qqbot-at-user id="user_1" />' in kwargs["content"]
+        assert kwargs["msg_type"] == 2
+        assert '<qqbot-at-user id="user_1" />' in kwargs["markdown"]["content"]
 
 
 async def test_empty_official_result_is_failure(platform_factory):

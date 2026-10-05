@@ -14,6 +14,7 @@ from astrbot.api.star import Context, Star, StarTools
 
 from .services.delivery import (
     OFFICIAL,
+    MentionDeliveryError,
     available,
     deliver,
     field,
@@ -72,6 +73,10 @@ class ReminderPlugin(Star):
         self.max_content = max(1, min(1500, int(config.get("max_content_length", 1000))))
         # v1.2 replaces the old v1.1 passive default with a new configuration key.
         self.delivery_mode = "proactive" if config.get("proactive_reminders", True) else "passive"
+        self.markdown_template_id = str(config.get("official_markdown_template_id", "")).strip()
+        self.markdown_parameter = (
+            str(config.get("official_markdown_parameter", "content")).strip() or "content"
+        )
         self._wake = asyncio.Event()
         self.store = ReminderStore(StarTools.get_data_dir("astrbot_plugin_tixing") / "reminders.db")
         self.owner = uuid.uuid4().hex
@@ -250,8 +255,28 @@ class ReminderPlugin(Star):
 
     async def _fire(self, platform, rem, reply=None):
         try:
-            await asyncio.wait_for(deliver(platform, rem, reply), timeout=30)
+            await asyncio.wait_for(
+                deliver(
+                    platform,
+                    rem,
+                    reply,
+                    markdown_template_id=self.markdown_template_id,
+                    markdown_parameter=self.markdown_parameter,
+                ),
+                timeout=30,
+            )
         except Exception as exc:
+            if isinstance(exc, MentionDeliveryError):
+                await self.store.wait_for_permission(
+                    rem["id"],
+                    self.owner,
+                    f"Markdown @ 格式受限：{exc}；任务保留，每 5 分钟重试",
+                    time.time() + 300,
+                )
+                logger.warning(
+                    "[Reminder] 提醒 #%s 等待 Markdown 配置，任务已保留：%s", rem["id"], exc
+                )
+                return
             if reply is None and rem["platform_name"] in OFFICIAL and proactive_denied(exc):
                 if rem["scene"] == "group":
                     await self.store.set_permission(
@@ -466,6 +491,8 @@ class ReminderPlugin(Star):
                 if rem["waiting_reason"].startswith("主动消息权限")
                 else "等待可回复消息"
             )
+            if rem["waiting_reason"].startswith("Markdown @"):
+                status = "等待 Markdown 配置"
         content = (
             rem["content"]
             if detail

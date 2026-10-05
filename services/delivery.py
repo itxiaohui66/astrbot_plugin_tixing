@@ -1,10 +1,32 @@
 """Deliver through the current adapter using a validated incoming reply context."""
 
+import re
 import time
 from datetime import datetime
 from html import escape
 
 OFFICIAL = {"qq_official", "qq_official_webhook"}
+
+
+class MentionDeliveryError(RuntimeError):
+    """The app cannot send the Markdown format required by this delivery path."""
+
+
+def markdown_unavailable(exc):
+    text = str(exc).lower()
+    return ("markdown" in text or "模板" in text) and any(
+        token in text
+        for token in (
+            "不允许",
+            "权限",
+            "无效",
+            "不合法",
+            "不存在",
+            "not allowed",
+            "permission",
+            "invalid",
+        )
+    )
 
 
 def proactive_denied(exc):
@@ -100,12 +122,30 @@ def available(platform):
 
 
 def reminder_text(rem):
-    creator = rem["creator_name"] or rem["creator_id"]
+    # AstrBot may use an OpenID as the display-name fallback. Keep IDs out of prose.
+    creator = rem["creator_name"]
+    if not creator or creator == rem["creator_id"]:
+        creator = "群成员" if rem["scene"] in {"group", "channel"} else "用户"
     prefix = f"来自 {creator} 的提醒：\n" if rem["target_id"] != rem["creator_id"] else ""
     return f"{prefix}⏰ {rem['content']}\n（提醒 #{rem['id']}）"
 
 
-async def deliver(platform, rem, reply=None):
+def official_mention(user_id):
+    """QQ native mention token; do not replace it with visible @OpenID text."""
+    return f'<qqbot-at-user id="{escape(str(user_id), quote=True)}" />'
+
+
+def reminder_markdown(rem):
+    # Keep the mention outside user-provided text/code blocks. Preserve reminder
+    # text literally instead of interpreting its punctuation as Markdown syntax.
+    text = escape(reminder_text(rem), quote=False)
+    text = re.sub(r"([\\`*_{}\[\]()#+.!|~\-])", r"\\\1", text)
+    return official_mention(rem["target_id"]) + "\n\n" + text.replace("\n", "\n\n")
+
+
+async def deliver(
+    platform, rem, reply=None, *, markdown_template_id="", markdown_parameter="content"
+):
     """Official SDK return value must contain a message ID to count as sent."""
     client = platform.get_client()
     text = reminder_text(rem)
@@ -116,17 +156,36 @@ async def deliver(platform, rem, reply=None):
         if scene not in {"group", "c2c"}:
             kwargs.pop("msg_seq", None)
         if scene == "group":
-            mention = f'<qqbot-at-user id="{escape(rem["target_id"], quote=True)}" />'
-            result = await api.post_group_message(
-                group_openid=rem["destination"], msg_type=0, content=f"{mention}\n{text}", **kwargs
+            body = reminder_markdown(rem)
+            markdown = (
+                {
+                    "custom_template_id": markdown_template_id,
+                    "params": [{"key": markdown_parameter, "values": [body]}],
+                }
+                if markdown_template_id
+                else {"content": body}
             )
+            try:
+                result = await api.post_group_message(
+                    group_openid=rem["destination"], msg_type=2, markdown=markdown, **kwargs
+                )
+            except Exception as exc:
+                if markdown_unavailable(exc):
+                    raise MentionDeliveryError(
+                        "QQ 拒绝 Markdown @ 消息，请开通原生 Markdown，或配置已获批的 "
+                        "official_markdown_template_id / official_markdown_parameter；"
+                        f"原始错误：{exc}"
+                    ) from exc
+                raise
         elif scene == "c2c":
             result = await api.post_c2c_message(
                 openid=rem["destination"], msg_type=0, content=text, **kwargs
             )
         elif scene == "channel":
             result = await api.post_message(
-                channel_id=rem["destination"], content=f"<@{rem['target_id']}>\n{text}", **kwargs
+                channel_id=rem["destination"],
+                content=f"{official_mention(rem['target_id'])}\n{text}",
+                **kwargs,
             )
         elif scene == "guild_dm":
             result = await api.post_dms(guild_id=rem["destination"], content=text, **kwargs)
