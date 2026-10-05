@@ -1,7 +1,7 @@
 name: astrbot_plugin_tixing
 display_name: 栗子提醒
 desc: 完整移植栗子 QQ 机器人的单次、每日、每周和他人提醒，支持列表、取消、持久化恢复及投递失败重试。
-version: v1.1.0
+version: v1.2.0
 author: itxiaohui
 repo: https://github.com/itxiaohui66/astrbot_plugin_tixing
 support_platforms:

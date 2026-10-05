@@ -151,9 +151,7 @@ async def test_ambiguous_multiple_all_and_private(tmp_path, event_factory):
 async def plugin(plugin_class, platform_factory):
     platform = platform_factory()
     context = SimpleNamespace(platform_manager=SimpleNamespace(platform_insts=[platform]))
-    instance = plugin_class(
-        context, {"check_interval_seconds": 999, "official_delivery_mode": "proactive"}
-    )
+    instance = plugin_class(context, {"check_interval_seconds": 999})
     await instance.store.initialize()
     # Control scans explicitly in integration tests; lifecycle is tested separately.
     instance._ready = True
@@ -179,7 +177,7 @@ async def test_due_success_once_and_recurring(plugin):
 async def test_failures_retry_then_cancel_and_history(plugin, event_factory):
     instance, platform = plugin
     instance.retry_seconds = 0
-    platform.get_client().api.post_group_message.side_effect = RuntimeError("没有主动消息权限")
+    platform.get_client().api.post_group_message.side_effect = RuntimeError("服务暂时不可用")
     rem_id = await instance.store.add(record(), 10)
     for count in range(1, 4):
         await instance._check_due()
@@ -188,7 +186,7 @@ async def test_failures_retry_then_cancel_and_history(plugin, event_factory):
         assert rem["status"] == ("cancelled" if count == 3 else "active")
     event = event_factory("/tx history")
     await instance.tx(event)
-    assert "没有主动消息权限" in event.replies[0]
+    assert "服务暂时不可用" in event.replies[0]
     assert "已取消" in event.replies[0]
 
 

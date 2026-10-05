@@ -70,6 +70,13 @@ class ReminderStore:
                     used INTEGER NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(platform_id, scene, destination)
                 );
+                CREATE TABLE IF NOT EXISTS group_permissions (
+                    platform_id TEXT NOT NULL, destination TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'unknown', notified INTEGER NOT NULL DEFAULT 0,
+                    notice_until REAL NOT NULL DEFAULT 0, event_at REAL NOT NULL DEFAULT 0,
+                    event_id TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY(platform_id, destination)
+                );
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(reminders)")}
             if "waiting_reason" not in columns:
@@ -78,6 +85,98 @@ class ReminderStore:
                 )
 
         await self._run(create)
+
+    async def permission(self, platform_id, destination):
+        return await self._run(
+            lambda db: dict(
+                db.execute(
+                    "SELECT * FROM group_permissions WHERE platform_id=? AND destination=?",
+                    (platform_id, destination),
+                ).fetchone()
+                or {"state": "unknown", "notified": 0}
+            )
+        )
+
+    async def set_permission(
+        self, platform_id, destination, state, event_at=None, event_id="", reset=False
+    ):
+        def write(db):
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT OR IGNORE INTO group_permissions(platform_id,destination) VALUES (?,?)",
+                (platform_id, destination),
+            )
+            row = db.execute(
+                "SELECT * FROM group_permissions WHERE platform_id=? AND destination=?",
+                (platform_id, destination),
+            ).fetchone()
+            if event_at is not None and (
+                event_at < row["event_at"] or (event_id and event_id == row["event_id"])
+            ):
+                return False
+            reset_notice = reset and (row["state"] != state or event_at is not None)
+            db.execute(
+                "UPDATE group_permissions SET state=?,event_at=COALESCE(?,event_at),"
+                "event_id=CASE WHEN ?!='' THEN ? ELSE event_id END,"
+                "notified=CASE WHEN ? THEN 0 ELSE notified END,"
+                "notice_until=CASE WHEN ? THEN 0 ELSE notice_until END "
+                "WHERE platform_id=? AND destination=?",
+                (
+                    state,
+                    event_at,
+                    event_id,
+                    event_id,
+                    reset_notice,
+                    reset_notice,
+                    platform_id,
+                    destination,
+                ),
+            )
+            if state == "granted":
+                db.execute(
+                    "UPDATE reminders SET retry_at=0,waiting_reason='' WHERE platform_id=? "
+                    "AND destination=? AND scene='group' AND status='active' "
+                    "AND waiting_reason LIKE '主动消息权限%'",
+                    (platform_id, destination),
+                )
+            return True
+
+        return await self._run(write)
+
+    async def claim_notice(self, platform_id, destination):
+        def write(db):
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT OR IGNORE INTO group_permissions(platform_id,destination) VALUES (?,?)",
+                (platform_id, destination),
+            )
+            return (
+                db.execute(
+                    "UPDATE group_permissions SET notice_until=? WHERE platform_id=? "
+                    "AND destination=? AND state!='granted' AND notified=0 AND notice_until<=?",
+                    (time.time() + 60, platform_id, destination, time.time()),
+                ).rowcount
+                == 1
+            )
+
+        return await self._run(write)
+
+    async def finish_notice(self, platform_id, destination, sent):
+        await self._run(
+            lambda db: db.execute(
+                "UPDATE group_permissions SET notified=MAX(notified,?),notice_until=0 WHERE platform_id=? AND destination=?",
+                (int(sent), platform_id, destination),
+            )
+        )
+
+    async def wait_for_permission(self, reminder_id, owner, reason, retry_at):
+        await self._run(
+            lambda db: db.execute(
+                "UPDATE reminders SET waiting_reason=?,retry_at=?,lease_owner='',lease_until=0 "
+                "WHERE id=? AND lease_owner=? AND status='active'",
+                (reason[:500], retry_at, reminder_id, owner),
+            )
+        )
 
     async def observe(self, scope, user_id, nickname=""):
         await self._run(

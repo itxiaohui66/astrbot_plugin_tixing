@@ -15,7 +15,7 @@ from services.storage import ReminderStore
 async def passive_plugin(plugin_class, platform_factory):
     platform = platform_factory()
     context = SimpleNamespace(platform_manager=SimpleNamespace(platform_insts=[platform]))
-    instance = plugin_class(context, {"check_interval_seconds": 999})
+    instance = plugin_class(context, {"check_interval_seconds": 999, "proactive_reminders": False})
     await instance.store.initialize()
     instance._ready = True
     assert instance.delivery_mode == "passive"

@@ -1,5 +1,5 @@
 {
-  "official_delivery_mode": {"type": "string", "description": "QQ 官方发送方式", "options": ["passive", "proactive"], "hint": "默认 passive 被动回复；没有有效回复窗口时保留任务等待下次消息。仅已确认支持主动消息的账号选择 proactive。", "default": "passive"},
+  "proactive_reminders": {"type": "bool", "description": "QQ 官方到点主动提醒", "hint": "默认开启；首次入群/使用提示管理员允许主动消息。关闭后使用有时效和额度限制的被动回复。v1.2 起替代旧 official_delivery_mode 配置。", "default": true},
   "timezone": {"type": "string", "description": "提醒时区", "hint": "IANA 时区名称，默认北京时间；修改只影响新建提醒。", "default": "Asia/Shanghai"},
   "max_per_user": {"type": "int", "description": "每人在每个群/私聊最多活跃提醒数", "default": 10},
   "check_interval_seconds": {"type": "int", "description": "到期扫描间隔（秒）", "default": 30},

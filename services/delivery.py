@@ -7,6 +7,14 @@ from html import escape
 OFFICIAL = {"qq_official", "qq_official_webhook"}
 
 
+def proactive_denied(exc):
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in ("主动消息失败", "无权限", "permission", "not allowed", "主动消息权限")
+    )
+
+
 def incoming_reply(event):
     """Read an inbound message ID and its original timestamp, never a sent ID."""
     raw = event.message_obj.raw_message

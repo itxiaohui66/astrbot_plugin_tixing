@@ -16,11 +16,14 @@ from .services.delivery import (
     OFFICIAL,
     available,
     deliver,
+    field,
     find_platform,
     incoming_reply,
+    proactive_denied,
     reply_unavailable,
     route,
 )
+from .services.permissions import NOTICE, PermissionBridge
 from .services.storage import ReminderStore, scope_key
 from .services.targets import MARKUP, resolve_target
 from .services.time_parser import describe, next_occurrence, parse_time
@@ -41,11 +44,13 @@ HELP = """⏰ 栗子提醒
 /tx retry 编号 恢复投递失败的提醒
 /tx identity 查看当前平台、群和用户标识
 /tx status 查看提醒调度器状态
+/tx permission 查看主动消息权限说明
+/tx permission check 发送主动消息验证权限
 /cxzd 管理员重启提醒调度器
 命令别名：/提醒、/remind
 群内官方 QQ 需要 @机器人；时间按配置时区计算。
 官方 QQ 提醒他人须使用本群 OpenID 或真实 @；普通 QQ 号不可转换。
-默认使用被动回复；没有有效回复窗口时等待下次 @机器人 补发。
+默认到点主动提醒；群主/管理员需开启“允许机器人主动发送消息”。
 管理员可 /tx list all 和 /tx cancel 编号 管理当前群提醒。"""
 
 
@@ -65,9 +70,8 @@ class ReminderPlugin(Star):
         self.max_failures = max(1, int(config.get("max_delivery_failures", 3)))
         self.retry_seconds = max(1, int(config.get("retry_interval_seconds", 60)))
         self.max_content = max(1, min(1500, int(config.get("max_content_length", 1000))))
-        self.delivery_mode = config.get("official_delivery_mode", "passive")
-        if self.delivery_mode not in {"passive", "proactive"}:
-            raise ValueError("official_delivery_mode 必须为 passive 或 proactive")
+        # v1.2 replaces the old v1.1 passive default with a new configuration key.
+        self.delivery_mode = "proactive" if config.get("proactive_reminders", True) else "passive"
         self._wake = asyncio.Event()
         self.store = ReminderStore(StarTools.get_data_dir("astrbot_plugin_tixing") / "reminders.db")
         self.owner = uuid.uuid4().hex
@@ -76,6 +80,8 @@ class ReminderPlugin(Star):
         self._init_lock = asyncio.Lock()
         self._scan_lock = asyncio.Lock()
         self._scheduler = None
+        self._permission_watcher = None
+        self._bridges = {}
         self.last_scan = 0
         self.last_scan_error = ""
 
@@ -86,12 +92,99 @@ class ReminderPlugin(Star):
             if not self._ready:
                 await self.store.initialize()
                 self._ready = True
+            await self._attach_platforms()
+            if self._permission_watcher is None or self._permission_watcher.done():
+                self._permission_watcher = asyncio.create_task(self._watch_platforms())
             if self._scheduler is None or self._scheduler.done():
                 self._scheduler = asyncio.create_task(self._poll(), name="lizi-reminders")
 
     @filter.on_astrbot_loaded()
     async def on_loaded(self):
         await self.initialize()
+
+    async def _attach_platforms(self):
+        live = set()
+        for platform in self.context.platform_manager.platform_insts:
+            if platform.meta().name not in OFFICIAL:
+                continue
+            client = platform.get_client()
+            if client is None:
+                continue
+            key = id(client)
+            live.add(key)
+            if key not in self._bridges:
+                bridge = PermissionBridge(platform, self._permission_event)
+                bridge.install()
+                self._bridges[key] = bridge
+        for key in set(self._bridges) - live:
+            await self._bridges.pop(key).close()
+
+    async def _watch_platforms(self):
+        while True:
+            await asyncio.sleep(5)
+            try:
+                await self._attach_platforms()
+            except Exception:
+                logger.exception("[Reminder] 连接 QQ 群权限事件失败，将继续重试")
+
+    async def _permission_event(self, platform, kind, event):
+        if self._closed:
+            return
+        destination = str(field(event, "group_openid") or "")
+        if not destination:
+            return
+        platform_id = str(platform.meta().id)
+        event_id = str(field(event, "event_id") or "")
+        stamp = field(event, "timestamp")
+        try:
+            event_at = float(stamp)
+        except (ValueError, TypeError):
+            try:
+                event_at = datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                event_at = time.time()
+        states = {
+            "group_add_robot": "unknown",
+            "group_del_robot": "removed",
+            "group_msg_receive": "granted",
+            "group_msg_reject": "denied",
+        }
+        changed = await self.store.set_permission(
+            platform_id,
+            destination,
+            states[kind],
+            event_at,
+            event_id,
+            reset=kind in {"group_add_robot", "group_del_robot", "group_msg_reject"},
+        )
+        if not changed:
+            return
+        if kind == "group_msg_receive":
+            self._wake.set()
+        if kind != "group_add_robot" or not event_id or self.delivery_mode != "proactive":
+            return
+        if not await self.store.claim_notice(platform_id, destination):
+            return
+        sent = False
+        try:
+            # A real join event can be replied to even before proactive permission is enabled.
+            result = await asyncio.wait_for(
+                platform.get_client().api.post_group_message(
+                    group_openid=destination,
+                    msg_type=0,
+                    content=NOTICE,
+                    event_id=event_id,
+                    msg_seq=20001,
+                ),
+                timeout=30,
+            )
+            sent = bool(field(result, "id"))
+            if not sent:
+                logger.warning("[Reminder] 入群权限提示没有返回消息 ID，将在首次命令时提示")
+        except Exception as exc:
+            logger.warning("[Reminder] 入群权限提示失败，将在首次命令时提示：%s", exc)
+        finally:
+            await self.store.finish_notice(platform_id, destination, sent)
 
     async def _poll(self):
         while True:
@@ -117,6 +210,20 @@ class ReminderPlugin(Star):
                 if not await self.store.claim(rem["id"], self.owner, time.time()):
                     continue
                 reply = None
+                if (
+                    rem["platform_name"] in OFFICIAL
+                    and self.delivery_mode == "proactive"
+                    and rem["scene"] == "group"
+                ):
+                    permission = await self.store.permission(rem["platform_id"], rem["destination"])
+                    if permission["state"] in {"denied", "removed"}:
+                        await self.store.wait_for_permission(
+                            rem["id"],
+                            self.owner,
+                            "主动消息权限未开启或机器人已退群；请管理员开启后 /tx permission check 验证",
+                            time.time() + 300,
+                        )
+                        continue
                 if rem["platform_name"] in OFFICIAL and self.delivery_mode == "passive":
                     # QQ documents group/channel/DM windows of 5 min, C2C 60 min.
                     # Leave a margin for the 30 s send timeout.
@@ -145,6 +252,21 @@ class ReminderPlugin(Star):
         try:
             await asyncio.wait_for(deliver(platform, rem, reply), timeout=30)
         except Exception as exc:
+            if reply is None and rem["platform_name"] in OFFICIAL and proactive_denied(exc):
+                if rem["scene"] == "group":
+                    await self.store.set_permission(
+                        rem["platform_id"], rem["destination"], "error", reset=True
+                    )
+                await self.store.wait_for_permission(
+                    rem["id"],
+                    self.owner,
+                    f"主动消息权限受限：{exc}；请管理员开启后 /tx permission check 验证，任务保留并每 5 分钟重试",
+                    time.time() + 300,
+                )
+                logger.warning(
+                    "[Reminder] 提醒 #%s 等待主动消息权限，任务已保留：%s", rem["id"], exc
+                )
+                return
             if reply is not None and reply_unavailable(exc):
                 await self.store.block_reply(
                     rem["platform_id"], rem["scene"], rem["destination"], reply["msg_id"]
@@ -173,6 +295,8 @@ class ReminderPlugin(Star):
                 rem["remind_at"], rem["repeat_type"], rem["timezone"], time.time()
             )
         await self.store.success(rem["id"], self.owner, next_time)
+        if reply is None and rem["platform_name"] in OFFICIAL and rem["scene"] == "group":
+            await self.store.set_permission(rem["platform_id"], rem["destination"], "granted")
         logger.info("[Reminder] 提醒 #%s 已投递，平台=%s", rem["id"], rem["platform_id"])
 
     def _admin(self, event):
@@ -194,7 +318,25 @@ class ReminderPlugin(Star):
 
     async def _reply(self, event, text):
         # Passive command responses are sent by AstrBot using the current event.
-        await event.send(event.plain_result(text))
+        destination = ""
+        if event.get_platform_name() in OFFICIAL and self.delivery_mode == "proactive":
+            try:
+                scene, dest = route(event)
+            except ValueError:
+                scene, dest = "", ""
+            if scene == "group" and await self.store.claim_notice(
+                str(event.get_platform_id()), dest
+            ):
+                destination = dest
+                if NOTICE not in text:
+                    text += "\n\n" + NOTICE
+        sent = False
+        try:
+            await event.send(event.plain_result(text))
+            sent = True
+        finally:
+            if destination:
+                await self.store.finish_notice(str(event.get_platform_id()), destination, sent)
 
     async def _guard(self, event, action):
         try:
@@ -249,7 +391,10 @@ class ReminderPlugin(Star):
                     scope, None if self._admin(event) else user, int(tail), self.limit
                 )
             self._wake.set()
-            await self._reply(event, f"✅ 提醒 #{tail} 已恢复，等待有效回复窗口投递。")
+            await self._reply(event, f"✅ 提醒 #{tail} 已恢复，将按当前发送方式重试投递。")
+            return
+        if action in {"permission", "权限"}:
+            await self._permission_command(event, tail)
             return
         if action in {"detail", "详情"}:
             if not tail.isdecimal():
@@ -310,13 +455,17 @@ class ReminderPlugin(Star):
             if self.delivery_mode == "passive":
                 message += "\n使用被动回复：到期有有效回复窗口时发送，否则等待下次 @机器人 补发。"
             else:
-                message += "\n使用主动投递；发送权限或额度受限时会记录失败。"
+                message += "\n到点主动提醒；权限受限时保留任务，等待开启权限后补发。"
         await self._reply(event, message)
 
     def _format(self, rem, detail=False):
         status = {"active": "待提醒", "done": "已完成", "cancelled": "已取消"}[rem["status"]]
         if rem["status"] == "active" and rem.get("waiting_reason"):
-            status = "等待可回复消息"
+            status = (
+                "等待主动消息权限"
+                if rem["waiting_reason"].startswith("主动消息权限")
+                else "等待可回复消息"
+            )
         content = (
             rem["content"]
             if detail
@@ -333,6 +482,46 @@ class ReminderPlugin(Star):
         if rem.get("waiting_reason"):
             text += f"\n等待原因：{rem['waiting_reason'][:150]}"
         return text
+
+    async def _permission_command(self, event, tail):
+        if event.get_platform_name() not in OFFICIAL or route(event)[0] != "group":
+            raise ValueError("主动消息群权限检查仅适用于 QQ 官方群聊。")
+        platform_id = str(event.get_platform_id())
+        destination = route(event)[1]
+        if not tail:
+            state = (await self.store.permission(platform_id, destination))["state"]
+            labels = {
+                "unknown": "尚未验证",
+                "granted": "已收到允许事件或发送成功记录",
+                "denied": "收到管理员关闭权限事件",
+                "removed": "机器人已被移出群",
+                "error": "最近一次主动发送被拒绝",
+            }
+            await self._reply(event, f"本群状态：{labels[state]}\n{NOTICE}")
+            return
+        if tail.lower() not in {"check", "检查", "验证"}:
+            raise ValueError("用法：/tx permission 或 /tx permission check")
+        platform = find_platform(self.context, platform_id)
+        if not available(platform):
+            raise ValueError("QQ 适配器尚未运行，请稍后再验证。")
+        try:
+            result = await asyncio.wait_for(
+                platform.get_client().api.post_group_message(
+                    group_openid=destination,
+                    msg_type=0,
+                    content="✅ 主动消息权限验证成功。此消息为主动发送，等待权限的到期提醒将继续投递。",
+                ),
+                timeout=30,
+            )
+            if not field(result, "id"):
+                raise RuntimeError("QQ 接口未返回消息 ID")
+        except Exception as exc:
+            if proactive_denied(exc):
+                await self.store.set_permission(platform_id, destination, "error", reset=True)
+            await self._reply(event, f"❌ 主动消息验证失败：{str(exc)[:250]}\n{NOTICE}")
+            return
+        await self.store.set_permission(platform_id, destination, "granted")
+        self._wake.set()
 
     async def _list(self, event, scope, user, tail, history):
         all_users = tail.split()[:1] == ["all"]
@@ -441,8 +630,16 @@ class ReminderPlugin(Star):
     async def terminate(self):
         async with self._init_lock:
             self._closed = True
+            if self._permission_watcher:
+                self._permission_watcher.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._permission_watcher
+                self._permission_watcher = None
             if self._scheduler:
                 self._scheduler.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._scheduler
                 self._scheduler = None
+            for bridge in self._bridges.values():
+                await bridge.close()
+            self._bridges.clear()
