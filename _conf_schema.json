@@ -1,0 +1,10 @@
+{
+  "timezone": {"type": "string", "description": "提醒时区", "hint": "IANA 时区名称，默认北京时间；修改只影响新建提醒。", "default": "Asia/Shanghai"},
+  "max_per_user": {"type": "int", "description": "每人在每个群/私聊最多活跃提醒数", "default": 10},
+  "check_interval_seconds": {"type": "int", "description": "到期扫描间隔（秒）", "default": 30},
+  "max_delivery_failures": {"type": "int", "description": "连续投递失败多少次后自动取消", "default": 3},
+  "retry_interval_seconds": {"type": "int", "description": "投递失败重试间隔（秒）", "default": 60},
+  "max_content_length": {"type": "int", "description": "提醒内容最大字符数（上限 1500）", "default": 1000},
+  "admin_ids": {"type": "list", "description": "额外机器人管理员用户标识", "hint": "官方 QQ 使用 OpenID，使用 /tx identity 查看；无需复制旧 QQ 号管理员配置。", "default": []},
+  "group_admin_ids": {"type": "list", "description": "本群授权管理员标识", "hint": "格式：平台ID|群OpenID|用户OpenID，使用 /tx identity 查看。", "default": []}
+}
