@@ -151,7 +151,9 @@ async def test_ambiguous_multiple_all_and_private(tmp_path, event_factory):
 async def plugin(plugin_class, platform_factory):
     platform = platform_factory()
     context = SimpleNamespace(platform_manager=SimpleNamespace(platform_insts=[platform]))
-    instance = plugin_class(context, {"check_interval_seconds": 999})
+    instance = plugin_class(
+        context, {"check_interval_seconds": 999, "official_delivery_mode": "proactive"}
+    )
     await instance.store.initialize()
     # Control scans explicitly in integration tests; lifecycle is tested separately.
     instance._ready = True
@@ -261,6 +263,7 @@ async def test_unload_waits_for_delivery_persistence(plugin_class, platform_fact
     context = SimpleNamespace(platform_manager=SimpleNamespace(platform_insts=[platform]))
     instance = plugin_class(context, {"check_interval_seconds": 999})
     await instance.store.initialize()
+    await instance.store.remember_reply("platform_1", "group", "group_1", "incoming", time.time())
     rem_id = await instance.store.add(record(), 10)
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -271,7 +274,7 @@ async def test_unload_waits_for_delivery_persistence(plugin_class, platform_fact
 
     platform.get_client().api.post_group_message.side_effect = delayed_send
     await instance.initialize()
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), timeout=2)
     unload = asyncio.create_task(instance.terminate())
     await asyncio.sleep(0)
     assert not unload.done()

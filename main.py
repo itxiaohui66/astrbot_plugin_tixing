@@ -12,7 +12,15 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 
-from .services.delivery import OFFICIAL, available, deliver, find_platform, route
+from .services.delivery import (
+    OFFICIAL,
+    available,
+    deliver,
+    find_platform,
+    incoming_reply,
+    reply_unavailable,
+    route,
+)
 from .services.storage import ReminderStore, scope_key
 from .services.targets import MARKUP, resolve_target
 from .services.time_parser import describe, next_occurrence, parse_time
@@ -30,12 +38,14 @@ HELP = """⏰ 栗子提醒
 /tx detail 编号 查看一条提醒
 /tx cancel 编号 取消自己的一条提醒
 /tx cancel all 取消自己当前会话的全部提醒
+/tx retry 编号 恢复投递失败的提醒
 /tx identity 查看当前平台、群和用户标识
 /tx status 查看提醒调度器状态
 /cxzd 管理员重启提醒调度器
 命令别名：/提醒、/remind
 群内官方 QQ 需要 @机器人；时间按配置时区计算。
 官方 QQ 提醒他人须使用本群 OpenID 或真实 @；普通 QQ 号不可转换。
+默认使用被动回复；没有有效回复窗口时等待下次 @机器人 补发。
 管理员可 /tx list all 和 /tx cancel 编号 管理当前群提醒。"""
 
 
@@ -55,6 +65,10 @@ class ReminderPlugin(Star):
         self.max_failures = max(1, int(config.get("max_delivery_failures", 3)))
         self.retry_seconds = max(1, int(config.get("retry_interval_seconds", 60)))
         self.max_content = max(1, min(1500, int(config.get("max_content_length", 1000))))
+        self.delivery_mode = config.get("official_delivery_mode", "passive")
+        if self.delivery_mode not in {"passive", "proactive"}:
+            raise ValueError("official_delivery_mode 必须为 passive 或 proactive")
+        self._wake = asyncio.Event()
         self.store = ReminderStore(StarTools.get_data_dir("astrbot_plugin_tixing") / "reminders.db")
         self.owner = uuid.uuid4().hex
         self._ready = False
@@ -87,7 +101,11 @@ class ReminderPlugin(Star):
             except Exception as exc:
                 self.last_scan_error = str(exc)[:300]
                 logger.exception("[Reminder] 扫描提醒失败，将在下一轮继续")
-            await asyncio.sleep(self.interval)
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=self.interval)
+            except asyncio.TimeoutError:
+                pass
+            self._wake.clear()
 
     async def _check_due(self):
         async with self._scan_lock:
@@ -98,19 +116,44 @@ class ReminderPlugin(Star):
                     continue
                 if not await self.store.claim(rem["id"], self.owner, time.time()):
                     continue
+                reply = None
+                if rem["platform_name"] in OFFICIAL and self.delivery_mode == "passive":
+                    # QQ documents group/channel/DM windows of 5 min, C2C 60 min.
+                    # Leave a margin for the 30 s send timeout.
+                    window = 3540 if rem["scene"] == "c2c" else 240
+                    reply = await self.store.reserve_reply(
+                        rem["platform_id"], rem["scene"], rem["destination"], time.time(), window
+                    )
+                    if reply is None:
+                        await self.store.wait_for_reply(
+                            rem["id"],
+                            self.owner,
+                            rem.get("waiting_reason")
+                            or "没有有效回复窗口或本条消息回复额度已用完，等待下次 @机器人 补发",
+                        )
+                        continue
                 # On unload, finish the current send + persistence before exiting.
                 # A send has a 30 s timeout, shorter than the 120 s DB lease.
-                task = asyncio.create_task(self._fire(platform, rem))
+                task = asyncio.create_task(self._fire(platform, rem, reply))
                 try:
                     await asyncio.shield(task)
                 except asyncio.CancelledError:
                     await task
                     raise
 
-    async def _fire(self, platform, rem):
+    async def _fire(self, platform, rem, reply=None):
         try:
-            await asyncio.wait_for(deliver(platform, rem), timeout=30)
+            await asyncio.wait_for(deliver(platform, rem, reply), timeout=30)
         except Exception as exc:
+            if reply is not None and reply_unavailable(exc):
+                await self.store.block_reply(
+                    rem["platform_id"], rem["scene"], rem["destination"], reply["msg_id"]
+                )
+                await self.store.wait_for_reply(
+                    rem["id"], self.owner, f"被动回复受限：{exc}；等待下次 @机器人 补发"
+                )
+                logger.info("[Reminder] 提醒 #%s 等待新的可回复消息：%s", rem["id"], exc)
+                return
             await self.store.failure(
                 rem["id"], self.owner, exc, self.max_failures, time.time() + self.retry_seconds
             )
@@ -156,6 +199,7 @@ class ReminderPlugin(Star):
     async def _guard(self, event, action):
         try:
             await self.initialize()
+            await self._remember_incoming(event)
             await action()
         except ValueError as exc:
             await self._reply(event, f"❌ {exc}")
@@ -197,6 +241,16 @@ class ReminderPlugin(Star):
         if action in {"cancel", "取消"}:
             await self._cancel(event, scope, user, tail)
             return
+        if action in {"retry", "重试"}:
+            if not tail.isdecimal():
+                raise ValueError("用法：/tx retry 编号")
+            async with self._scan_lock:
+                await self.store.resume(
+                    scope, None if self._admin(event) else user, int(tail), self.limit
+                )
+            self._wake.set()
+            await self._reply(event, f"✅ 提醒 #{tail} 已恢复，等待有效回复窗口投递。")
+            return
         if action in {"detail", "详情"}:
             if not tail.isdecimal():
                 raise ValueError("用法：/tx detail 编号")
@@ -221,7 +275,7 @@ class ReminderPlugin(Star):
             )
             await self._reply(
                 event,
-                f"调度器：{'运行中' if running else '停止'}\n当前会话活跃提醒：{len(reminders)}\n扫描间隔：{self.interval} 秒\n时区：{self.timezone}\n最近扫描：{last}"
+                f"调度器：{'运行中' if running else '停止'}\n当前会话活跃提醒：{len(reminders)}\n扫描间隔：{self.interval} 秒\n时区：{self.timezone}\n最近扫描：{last}\n官方发送方式：{self.delivery_mode}"
                 + (f"\n扫描错误：{self.last_scan_error}" if self.last_scan_error else ""),
             )
             return
@@ -253,11 +307,16 @@ class ReminderPlugin(Star):
         if target != user:
             message += f"\n提醒对象：{target_name or target}"
         if event.get_platform_name() in OFFICIAL:
-            message += "\n到期由 QQ 官方主动投递；发送权限或额度受限时会记录失败。"
+            if self.delivery_mode == "passive":
+                message += "\n使用被动回复：到期有有效回复窗口时发送，否则等待下次 @机器人 补发。"
+            else:
+                message += "\n使用主动投递；发送权限或额度受限时会记录失败。"
         await self._reply(event, message)
 
     def _format(self, rem, detail=False):
         status = {"active": "待提醒", "done": "已完成", "cancelled": "已取消"}[rem["status"]]
+        if rem["status"] == "active" and rem.get("waiting_reason"):
+            status = "等待可回复消息"
         content = (
             rem["content"]
             if detail
@@ -271,6 +330,8 @@ class ReminderPlugin(Star):
             text += f"\n创建者：{rem['creator_name'] or rem['creator_id']}\n时区：{rem['timezone']}\n失败次数：{rem['failure_count']}"
         if rem["last_error"]:
             text += f"\n最近投递失败：{rem['last_error'][:150]}"
+        if rem.get("waiting_reason"):
+            text += f"\n等待原因：{rem['waiting_reason'][:150]}"
         return text
 
     async def _list(self, event, scope, user, tail, history):
@@ -351,15 +412,31 @@ class ReminderPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def observe_member(self, event: AstrMessageEvent):
         """Remember group participants for OpenID/name resolution without intercepting chat."""
-        if event.get_platform_name() not in OFFICIAL | {"aiocqhttp"} or not event.get_group_id():
+        if event.get_platform_name() not in OFFICIAL | {"aiocqhttp"}:
             return
         try:
             await self.initialize()
-            await self.store.observe(
-                self._scope(event), str(event.get_sender_id()), event.get_sender_name()
-            )
+            await self._remember_incoming(event)
+            if event.get_group_id():
+                await self.store.observe(
+                    self._scope(event), str(event.get_sender_id()), event.get_sender_name()
+                )
         except Exception:
             logger.exception("[Reminder] 记录本群成员标识失败")
+
+    async def _remember_incoming(self, event):
+        if event.get_platform_name() not in OFFICIAL:
+            return
+        incoming = incoming_reply(event)
+        if incoming is None:
+            return
+        scene, destination = route(event)
+        if not destination:
+            return
+        await self.store.remember_reply(
+            str(event.get_platform_id()), scene, destination, **incoming
+        )
+        self._wake.set()
 
     async def terminate(self):
         async with self._init_lock:

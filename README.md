@@ -12,7 +12,7 @@
 https://github.com/itxiaohui66/astrbot_plugin_tixing
 ```
 
-也可以从 [GitHub Releases](https://github.com/itxiaohui66/astrbot_plugin_tixing/releases/latest) 下载 `astrbot_plugin_tixing-v1.0.0.zip`，在插件页上传安装。手动安装时，把 ZIP 中的 `astrbot_plugin_tixing` 文件夹解压到 AstrBot 的 `data/plugins/` 下，然后重启或重载插件。运行文件 `main.py`、`metadata.yaml` 和 `_conf_schema.json` 必须直接位于该插件文件夹中。
+也可以从 [GitHub Releases](https://github.com/itxiaohui66/astrbot_plugin_tixing/releases/latest) 下载 `astrbot_plugin_tixing-v1.1.0.zip`，在插件页上传安装。手动安装时，把 ZIP 中的 `astrbot_plugin_tixing` 文件夹解压到 AstrBot 的 `data/plugins/` 下，然后重启或重载插件。运行文件 `main.py`、`metadata.yaml` 和 `_conf_schema.json` 必须直接位于该插件文件夹中。
 
 安装时 AstrBot 会读取 `requirements.txt` 安装 `tzdata`。配置默认采用北京时间 `Asia/Shanghai`；每人在每个群或私聊最多 10 个活跃提醒，每 30 秒扫描一次。确认机器人已经接入 QQ 官方适配器，群内使用 `@机器人 /tx help` 查看帮助。
 
@@ -27,7 +27,7 @@ https://github.com/itxiaohui66/astrbot_plugin_tixing
 | 每人最多 10 条 | 按平台 + 群/私聊 + 创建者计算，仅统计活跃任务；支持配置 |
 | 30 秒轮询 | 可配置；通常在到期后一个扫描周期内发送，拥塞时可能更晚 |
 | 数据库存储、重启恢复 | SQLite 位于 AstrBot `data/plugin_data/astrbot_plugin_tixing/reminders.db` |
-| 投递失败重试、达到阈值取消 | 默认重试间隔 60 秒，连续 3 次失败自动取消；保留错误原因 |
+| 投递失败重试、达到阈值取消 | 普通投递错误默认重试间隔 60 秒，连续 3 次失败自动取消；回复窗口/额度受限则等待新消息，不增加失败次数 |
 | `/cxzd` 重启提醒调度器 | 保留；使用 AstrBot 管理员或插件授权管理员，不丢任务 |
 | 旧帮助中的 `/提醒`、`/remind` | 实现为 `/tx` 别名 |
 | 旧帮助中的今天、明天、指定日期 | 原代码未实现的格式已补齐，并支持后天 |
@@ -53,7 +53,9 @@ https://github.com/itxiaohui66/astrbot_plugin_tixing
 
 时间和内容之间要有空格。内容可以包含空格、换行，默认最多 1000 个字符。单次 `HH:MM` 表示今天该时刻，已经过去则提示改用未来时间；每天和每周自动计算下一次。提醒间隔必须大于 0，小时范围 0–23，分钟范围 0–59。
 
-到期后在创建时的群或私聊发送提醒。循环任务按创建时的时区续期，修改配置时区只影响新任务。离线时错过多次循环，会在恢复后补发一次并续到下一次未来时刻，避免刷屏。一次性逾期提醒在恢复后补发；如果适配器还未加载或运行，不增加失败次数。
+到期后在创建时的群或私聊发送提醒。QQ 官方默认使用被动回复：只有存在有效的近期用户消息和回复额度时才投递，否则保留任务，在下一条机器人收到的同会话消息到来后尝试补发。因此，没有主动消息能力时，长时间后的提醒不能保证准点发出；群内可 `@机器人 /tx list` 打开新的回复窗口。
+
+循环任务按创建时的时区续期，修改配置时区只影响新任务。离线或等待期间错过多次循环，会在有效窗口中补发一次并续到下一次未来时刻，避免刷屏。一次性逾期提醒同样等待有效窗口补发；如果适配器还未加载或运行，不增加失败次数。OneBot 的发送方式保持原样。
 
 ## 管理命令
 
@@ -65,6 +67,7 @@ https://github.com/itxiaohui66/astrbot_plugin_tixing
 | `/tx detail 编号` | 查看全文、时间、状态、失败次数和最近错误 |
 | `/tx cancel 编号` / `/qxtx 编号` / `/取消提醒 编号` | 取消自己创建的任务 |
 | `/tx cancel all` | 仅取消自己在当前会话创建的所有活跃任务 |
+| `/tx retry 编号` | 恢复投递失败后自动取消的任务，或重试待投递任务；仍检查当前会话、创建者和数量限制 |
 | `/tx identity` | 当前平台、群、用户标识和本群授权管理员标识 |
 | `/tx status` | 调度器状态、当前会话活跃数量、时区、扫描间隔和最近错误 |
 | `/cxzd` / `/重启提醒` | 管理员重启提醒调度器 |
@@ -73,7 +76,9 @@ https://github.com/itxiaohui66/astrbot_plugin_tixing
 
 管理员可以取消当前会话其他人的单条任务、查看详情。按编号操作也受平台和群隔离限制。群管理员并不会自动获得机器人管理权限；使用 AstrBot 管理员配置，或在插件配置中加入 `admin_ids`、`group_admin_ids`。`group_admin_ids` 的格式为 `平台ID|群OpenID|用户OpenID`，可从 `/tx identity` 复制。
 
-列表每页 2 条，长内容显示预览，可用 `detail` 查看全文。投递超过失败阈值后会自动取消，可以在 `history` 中查到原因；修复权限或网络后重新创建即可。
+列表每页 2 条，长内容显示预览，可用 `detail` 查看全文。缺少回复窗口、额度用完或 QQ 拒绝该回复上下文时，状态显示“等待可回复消息”，不会因此自动取消。普通投递错误超过失败阈值后仍会自动取消，可以在 `history` 中查到原因。
+
+从 v1.0.0 更新后，数据库自动升级并保留原提醒。已经因“主动消息失败，无权限”自动取消的任务不会被擅自恢复；在原群中发送 `/tx retry 2`、`/tx retry 3` 等对应编号即可恢复。等待中的提醒、未到期提醒仍占用活跃任务额度。
 
 ## 官方 QQ 的对象和发送权限
 
@@ -85,7 +90,11 @@ https://github.com/itxiaohui66/astrbot_plugin_tixing
 
 插件会记住本群里机器人实际收到的成员消息，名字唯一且官方提供昵称时也支持 `@昵称`。不同群里的成员记录不会混用，重名时要求明确标识。OneBot 模式会查询目标是否是本群成员。私聊只能提醒自己。
 
-定时提醒属于主动消息，插件直接使用当前官方适配器的客户端发送，不保存旧 `msg_id`、不复用过期回复窗口。QQ 官方的主动消息权限、额度、风控和目标可达性仍适用。平台拒绝或未返回消息 ID 时记录为失败，只有获得消息 ID 后才标记成功或计算下一次时间。相关依据见 [腾讯官方 SDK 使用说明](https://github.com/tencent-connect/qqbot-nodejs/blob/main/USAGE.md)。
+v1.1.0 默认采用 **被动回复**：使用真正收到的用户消息 `msg_id`，群、频道、频道私信保守采用 4 分钟窗口，C2C 保守采用 59 分钟窗口，给网络发送留出安全余量。官方文档规定群回复有效期 5 分钟、C2C 60 分钟，每条消息最多回复 5 次；插件每个上下文最多投递 3 条提醒，留出回复次数给命令响应和其他插件。若其他插件已经用完回复额度，QQ 拒绝该上下文后会等待下一条消息。
+
+回复上下文按平台、场景和投递目标隔离，保存消息原始时间及已用次数；重复事件不会延长有效期或补充额度。群/C2C 的提醒采用与 AstrBot 当前回复发送范围分开的独立 `msg_seq`。新消息到来会唤醒扫描器，不必等到下一轮轮询。只有接口返回消息 ID 后才标记成功或续期；被动发送失败时不降级为无权限的主动发送。
+
+`official_delivery_mode=proactive` 仅保留给已确认具备该能力的环境使用。QQ 官方文档对主动推送有停止提供能力的公告，普通账号不能靠换 API 或旧消息 ID 绕过限制。详见 [腾讯官方消息收发文档](https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/send.md)。
 
 QQ 普通群使用 `<qqbot-at-user id="OpenID" />` 实现真正 @，频道使用频道成员 ID。群、C2C、频道、频道私信分别走对应 SDK 接口。插件自己的到期提醒使用普通文本，不要求 Markdown 模板；命令回复仍由 AstrBot 当前事件的配置发送。
 
@@ -97,6 +106,7 @@ QQ 普通群使用 `<qqbot-at-user id="OpenID" />` 实现真正 @，频道使用
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
+| `official_delivery_mode` | `passive` | 默认被动回复，等待有效窗口；可显式选 `proactive` 保留原发送方式 |
 | `timezone` | `Asia/Shanghai` | IANA 时区 |
 | `max_per_user` | `10` | 当前会话每人最多活跃任务 |
 | `check_interval_seconds` | `30` | 扫描周期，最小 1 秒 |
@@ -118,14 +128,15 @@ ruff format --check .
 python tools/package.py
 ```
 
-自动化测试使用真实 SQLite 和时间解析；AstrBot 主机边界和 QQ 发送接口使用测试替身，覆盖时间格式、上限、群隔离、成员识别、失败重试、循环补发、权限和热重载。GitHub Actions 会在 Linux（Python 3.10、3.12）和 Windows（Python 3.12）上运行测试、代码检查和打包。真实 QQ 投递仍需在实际部署的 AstrBot 和账号中验证。
+自动化测试使用真实 SQLite 和时间解析；AstrBot 主机边界和 QQ 发送接口使用测试替身，覆盖时间格式、上限、群隔离、成员识别、失败重试、循环补发、权限、热重载，以及回复时效、额度、序号、重复事件、即时唤醒和数据库升级。GitHub Actions 会在 Linux（Python 3.10、3.12）和 Windows（Python 3.12）上运行测试、代码检查和打包。真实 QQ 投递仍需在实际部署的 AstrBot 和账号中验证。
 
 安装后可用以下流程确认部署环境：
 
-1. `@机器人 /tx 1分钟 测试提醒`，确认返回任务编号，并在一分钟后加一个扫描周期内收到真正 @ 的通知。
+1. `@机器人 /tx 1分钟 测试提醒`，确认返回任务编号，并在有效回复窗口内收到真正 @ 的通知。
 2. `/tx history` 检查该任务状态；失败时检查记录里的原因和 AstrBot 日志。
 3. `/tx 5分钟 重启测试`，重载插件后用 `/tx list` 确认仍在，再 `/tx cancel 编号` 确认取消。
 4. 让另一成员先发送 `/tx identity`，测试本群的他人提醒。
+5. 超过群回复窗口后，确认 `/tx list` 显示待补发原因；在群里再次 @机器人 时应唤醒投递。若已因旧版错误自动取消，先 `/tx retry 编号` 恢复。
 
 ## 来源
 

@@ -1,8 +1,59 @@
-"""Deliver through the current adapter; never persist a live event or old msg_id."""
+"""Deliver through the current adapter using a validated incoming reply context."""
 
+import time
+from datetime import datetime
 from html import escape
 
 OFFICIAL = {"qq_official", "qq_official_webhook"}
+
+
+def incoming_reply(event):
+    """Read an inbound message ID and its original timestamp, never a sent ID."""
+    raw = event.message_obj.raw_message
+    data = field(raw, "raw_data", raw)
+    msg_id = str(
+        field(raw, "id") or field(data, "id") or field(event.message_obj, "message_id", "") or ""
+    )
+    if not msg_id:
+        return None
+    timestamp = (
+        field(raw, "timestamp") or field(data, "timestamp") or field(event.message_obj, "timestamp")
+    )
+    try:
+        received_at = float(timestamp)
+    except (TypeError, ValueError):
+        try:
+            parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return None
+            received_at = parsed.timestamp()
+        except (TypeError, ValueError):
+            return None
+    return {"msg_id": msg_id, "received_at": min(received_at, time.time())}
+
+
+def reply_unavailable(exc):
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "22009",
+            "msg limit exceed",
+            "msg_id",
+            "msg id",
+            "msg_seq",
+            "message expired",
+            "message is expired",
+            "消息过期",
+            "消息已过期",
+            "被动消息",
+            "回复超",
+            "超频",
+            "无权限",
+            "permission",
+            "主动消息失败",
+        )
+    )
 
 
 def field(value, name, default=None):
@@ -46,26 +97,31 @@ def reminder_text(rem):
     return f"{prefix}⏰ {rem['content']}\n（提醒 #{rem['id']}）"
 
 
-async def deliver(platform, rem):
+async def deliver(platform, rem, reply=None):
     """Official SDK return value must contain a message ID to count as sent."""
     client = platform.get_client()
     text = reminder_text(rem)
     if rem["platform_name"] in OFFICIAL:
         api = client.api
         scene = rem["scene"]
+        kwargs = dict(reply or {})
+        if scene not in {"group", "c2c"}:
+            kwargs.pop("msg_seq", None)
         if scene == "group":
             mention = f'<qqbot-at-user id="{escape(rem["target_id"], quote=True)}" />'
             result = await api.post_group_message(
-                group_openid=rem["destination"], msg_type=0, content=f"{mention}\n{text}"
+                group_openid=rem["destination"], msg_type=0, content=f"{mention}\n{text}", **kwargs
             )
         elif scene == "c2c":
-            result = await api.post_c2c_message(openid=rem["destination"], msg_type=0, content=text)
+            result = await api.post_c2c_message(
+                openid=rem["destination"], msg_type=0, content=text, **kwargs
+            )
         elif scene == "channel":
             result = await api.post_message(
-                channel_id=rem["destination"], content=f"<@{rem['target_id']}>\n{text}"
+                channel_id=rem["destination"], content=f"<@{rem['target_id']}>\n{text}", **kwargs
             )
         elif scene == "guild_dm":
-            result = await api.post_dms(guild_id=rem["destination"], content=text)
+            result = await api.post_dms(guild_id=rem["destination"], content=text, **kwargs)
         else:
             raise ValueError(f"未知官方 QQ 投递场景：{scene}")
         if not field(result, "id"):

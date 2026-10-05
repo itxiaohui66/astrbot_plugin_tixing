@@ -64,7 +64,18 @@ class ReminderStore:
                     nickname TEXT NOT NULL DEFAULT '', seen_at REAL NOT NULL,
                     PRIMARY KEY(scope, user_id)
                 );
+                CREATE TABLE IF NOT EXISTS reply_contexts (
+                    platform_id TEXT NOT NULL, scene TEXT NOT NULL, destination TEXT NOT NULL,
+                    msg_id TEXT NOT NULL, received_at REAL NOT NULL,
+                    used INTEGER NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(platform_id, scene, destination)
+                );
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(reminders)")}
+            if "waiting_reason" not in columns:
+                db.execute(
+                    "ALTER TABLE reminders ADD COLUMN waiting_reason TEXT NOT NULL DEFAULT ''"
+                )
 
         await self._run(create)
 
@@ -153,7 +164,7 @@ class ReminderStore:
 
     async def cancel(self, scope, creator_id, reminder_id=None):
         def write(db):
-            sql = "UPDATE reminders SET status='cancelled', lease_owner='', lease_until=0 WHERE scope=? AND status='active'"
+            sql = "UPDATE reminders SET status='cancelled', waiting_reason='', lease_owner='', lease_until=0 WHERE scope=? AND status='active'"
             params = [scope]
             if creator_id is not None:
                 sql += " AND creator_id=?"
@@ -171,7 +182,7 @@ class ReminderStore:
                 dict(r)
                 for r in db.execute(
                     "SELECT * FROM reminders WHERE status='active' AND remind_at<=? "
-                    "AND retry_at<=? AND lease_until<=? ORDER BY remind_at,id LIMIT 100",
+                    "AND retry_at<=? AND lease_until<=? ORDER BY remind_at,id",
                     (now, now, now),
                 )
             ]
@@ -195,7 +206,7 @@ class ReminderStore:
             lambda db: (
                 db.execute(
                     "UPDATE reminders SET status=?,remind_at=COALESCE(?,remind_at),failure_count=0,"
-                    "last_error='',retry_at=0,lease_owner='',lease_until=0 WHERE id=? AND lease_owner=? AND status='active'",
+                    "last_error='',waiting_reason='',retry_at=0,lease_owner='',lease_until=0 WHERE id=? AND lease_owner=? AND status='active'",
                     ("active" if next_time is not None else "done", next_time, reminder_id, owner),
                 ).rowcount
             )
@@ -204,7 +215,7 @@ class ReminderStore:
     async def failure(self, reminder_id, owner, error, maximum, retry_at):
         def write(db):
             db.execute(
-                "UPDATE reminders SET failure_count=failure_count+1,last_error=?,retry_at=?,"
+                "UPDATE reminders SET failure_count=failure_count+1,last_error=?,retry_at=?,waiting_reason='',"
                 "status=CASE WHEN failure_count+1>=? THEN 'cancelled' ELSE 'active' END,"
                 "lease_owner='',lease_until=0 WHERE id=? AND lease_owner=? AND status='active'",
                 (str(error)[:500], retry_at, maximum, reminder_id, owner),
@@ -221,3 +232,88 @@ class ReminderStore:
                 ).rowcount
             )
         )
+
+    async def remember_reply(self, platform_id, scene, destination, msg_id, received_at):
+        # Duplicate/replayed events must not renew expiry or refill reply quota.
+        await self._run(
+            lambda db: (
+                db.execute(
+                    "INSERT INTO reply_contexts(platform_id,scene,destination,msg_id,received_at) VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(platform_id,scene,destination) DO UPDATE SET "
+                    "msg_id=excluded.msg_id,received_at=excluded.received_at,used=0,blocked=0 "
+                    "WHERE reply_contexts.msg_id!=excluded.msg_id AND excluded.received_at>=reply_contexts.received_at",
+                    (platform_id, scene, destination, msg_id, received_at),
+                ).rowcount
+            )
+        )
+
+    async def reserve_reply(self, platform_id, scene, destination, now, window):
+        def reserve(db):
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT * FROM reply_contexts WHERE platform_id=? AND scene=? AND destination=?",
+                (platform_id, scene, destination),
+            ).fetchone()
+            # Reserve two of QQ's five replies for command responses/other plugins.
+            if (
+                not row
+                or row["blocked"]
+                or row["used"] >= 3
+                or not 0 <= now - row["received_at"] < window
+            ):
+                return None
+            db.execute(
+                "UPDATE reply_contexts SET used=used+1 WHERE platform_id=? AND scene=? AND destination=?",
+                (platform_id, scene, destination),
+            )
+            # AstrBot's official event sender uses random sequences in 1..10000.
+            return {"msg_id": row["msg_id"], "msg_seq": 20001 + row["used"]}
+
+        return await self._run(reserve)
+
+    async def block_reply(self, platform_id, scene, destination, msg_id):
+        await self._run(
+            lambda db: (
+                db.execute(
+                    "UPDATE reply_contexts SET blocked=1 WHERE platform_id=? AND scene=? AND destination=? AND msg_id=?",
+                    (platform_id, scene, destination, msg_id),
+                ).rowcount
+            )
+        )
+
+    async def wait_for_reply(self, reminder_id, owner, reason):
+        await self._run(
+            lambda db: (
+                db.execute(
+                    "UPDATE reminders SET waiting_reason=?,retry_at=0,lease_owner='',lease_until=0 "
+                    "WHERE id=? AND lease_owner=? AND status='active'",
+                    (reason[:500], reminder_id, owner),
+                ).rowcount
+            )
+        )
+
+    async def resume(self, scope, creator_id, reminder_id, limit):
+        def write(db):
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT * FROM reminders WHERE scope=? AND id=?", (scope, reminder_id)
+            ).fetchone()
+            if not row or (creator_id is not None and row["creator_id"] != creator_id):
+                raise ValueError("当前会话中找不到该提醒，或你没有操作权限。")
+            if row["status"] == "done" or (row["status"] == "cancelled" and not row["last_error"]):
+                raise ValueError("只能重试投递失败或正在等待的提醒。")
+            if row["lease_until"] > time.time():
+                raise ValueError("该提醒正在投递，请稍后重试。")
+            count = db.execute(
+                "SELECT COUNT(*) FROM reminders WHERE scope=? AND creator_id=? AND status='active' AND id!=?",
+                (scope, row["creator_id"], reminder_id),
+            ).fetchone()[0]
+            if count >= limit:
+                raise ValueError(f"最多只能设置 {limit} 个活跃提醒，请先取消一些。")
+            db.execute(
+                "UPDATE reminders SET status='active',failure_count=0,last_error='',waiting_reason='',"
+                "retry_at=0,lease_owner='',lease_until=0 WHERE id=?",
+                (reminder_id,),
+            )
+
+        await self._run(write)
