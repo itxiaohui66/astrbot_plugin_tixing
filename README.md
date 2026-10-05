@@ -12,7 +12,7 @@
 https://github.com/itxiaohui66/astrbot_plugin_tixing
 ```
 
-也可以从 [GitHub Releases](https://github.com/itxiaohui66/astrbot_plugin_tixing/releases/latest) 下载 `astrbot_plugin_tixing-v1.2.1.zip`，在插件页上传安装。手动安装时，把 ZIP 中的 `astrbot_plugin_tixing` 文件夹解压到 AstrBot 的 `data/plugins/` 下，然后重启或重载插件。运行文件 `main.py`、`metadata.yaml` 和 `_conf_schema.json` 必须直接位于该插件文件夹中。
+也可以从 [GitHub Releases](https://github.com/itxiaohui66/astrbot_plugin_tixing/releases/latest) 下载 `astrbot_plugin_tixing-v1.2.2.zip`，在插件页上传安装。手动安装时，把 ZIP 中的 `astrbot_plugin_tixing` 文件夹解压到 AstrBot 的 `data/plugins/` 下，然后重启或重载插件。运行文件 `main.py`、`metadata.yaml` 和 `_conf_schema.json` 必须直接位于该插件文件夹中。
 
 安装时 AstrBot 会读取 `requirements.txt` 安装 `tzdata`。配置默认采用北京时间 `Asia/Shanghai`；每人在每个群或私聊最多 10 个活跃提醒，每 30 秒扫描一次。确认机器人已经接入 QQ 官方适配器，群内使用 `@机器人 /tx help` 查看帮助。
 
@@ -90,6 +90,10 @@ https://github.com/itxiaohui66/astrbot_plugin_tixing
 /tx 30分钟 开会 @对方的用户标识
 ```
 
+v1.2.2 修复 SDK 的非空 `mentions` 列表丢失成员字段时覆盖完整原始数据，导致“提醒别人”退回提醒发起人的情况。解析会合并原始 QQ payload 和 SDK 信息，并从当前消息的原始正文恢复被适配器省略的真实 @，包括命令前的 @；不从引用消息中选取接收者。已知机器人及其别名始终排除在提醒对象之外。收到无法解析的额外 @ 元数据时会提示“未创建提醒”，不静默改成提醒自己。
+
+创建回复始终显示“提醒对象”：自己显示“你自己”，他人显示昵称或成员标识。发起人仍管理该任务，到期只 @ 保存的接收者。旧版已错误保存为提醒自己的任务无法从数据库还原原定接收者，请 `/tx cancel 编号` 后重新设置，并检查创建回复中的提醒对象。
+
 插件会记住本群里机器人实际收到的成员消息，名字唯一且官方提供昵称时也支持 `@昵称`。不同群里的成员记录不会混用，重名时要求明确标识。OneBot 模式会查询目标是否是本群成员。私聊只能提醒自己。
 
 v1.2.0 默认采用 **主动发送**。新群的 `GROUP_ADD_ROBOT` 事件到来时，插件使用该真实事件的 `event_id` 回复管理员开启说明；若事件缺失、发送失败或插件是后来才安装的，则在首次提醒命令回复中附加说明。提示按平台和群持久化，成功提示后不会在每次命令中重复。
@@ -151,7 +155,7 @@ python tools/package.py
 1. 首次命令或入群时确认收到权限开启提示；管理员开启“允许机器人主动发送消息”后，`@机器人 /tx permission check` 确认主动验证成功。
 2. `@机器人 /tx 1分钟 测试提醒`，确认返回任务编号，到期收到真正 @ 的通知；`/tx history` 检查状态，失败时查看原因和日志。
 3. `/tx 5分钟 重启测试`，重载插件后用 `/tx list` 确认仍在，再 `/tx cancel 编号` 确认取消。
-4. 让另一成员先发送 `/tx identity`，测试本群的他人提醒。
+4. `@机器人 /tx 1分钟 他人提醒测试 @另一成员`，确认创建回复中的提醒对象是对方；到期只 @ 对方，不 @ 发起人。若平台缺少标识，让对方先 `/tx identity` 再使用本群用户标识。
 5. `@机器人 /tx 6分钟 主动提醒测试`，期间不再 @机器人，确认到期仍收到提醒。若因权限不足显示等待，开好权限并再次验证；旧版已自动取消的任务需先 `/tx retry 编号` 恢复。
 
 ## 来源

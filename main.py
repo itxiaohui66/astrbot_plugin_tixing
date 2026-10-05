@@ -476,6 +476,8 @@ class ReminderPlugin(Star):
         message = f"⏰ 提醒已设置 #{reminder_id}\n时间：{describe(record['remind_at'], parsed.repeat, self.timezone)}\n时区：{self.timezone}\n内容：{parsed.content}"
         if target != user:
             message += f"\n提醒对象：{target_name or target}"
+        else:
+            message += "\n提醒对象：你自己"
         if event.get_platform_name() in OFFICIAL:
             if self.delivery_mode == "passive":
                 message += "\n使用被动回复：到期有有效回复窗口时发送，否则等待下次 @机器人 补发。"
