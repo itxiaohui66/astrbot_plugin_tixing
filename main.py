@@ -26,7 +26,7 @@ from .services.delivery import (
 )
 from .services.permissions import NOTICE, PermissionBridge
 from .services.storage import ReminderStore, scope_key
-from .services.targets import MARKUP, resolve_target
+from .services.targets import MARKUP, observe_members, resolve_target
 from .services.time_parser import describe, next_occurrence, parse_time
 
 HELP = """⏰ 栗子提醒
@@ -50,7 +50,8 @@ HELP = """⏰ 栗子提醒
 /cxzd 管理员重启提醒调度器
 命令别名：/提醒、/remind
 群内官方 QQ 需要 @机器人；时间按配置时区计算。
-官方 QQ 提醒他人须使用本群 OpenID 或真实 @；普通 QQ 号不可转换。
+提醒他人：输入 @ 后从 QQ 群成员列表选中对方，机器人自动识别，无需填 ID。
+已识别的本群成员也支持 @昵称；昵称带空格可用 @"小 明"。
 默认到点主动提醒；群主/管理员需开启“允许机器人主动发送消息”。
 管理员可 /tx list all 和 /tx cancel 编号 管理当前群提醒。"""
 
@@ -398,7 +399,7 @@ class ReminderPlugin(Star):
             raise ValueError("当前插件支持 QQ 官方 WebSocket、Webhook 和 OneBot。")
         scope = self._scope(event)
         user = str(event.get_sender_id())
-        await self.store.observe(scope, user, event.get_sender_name())
+        await observe_members(event, self.store, scope)
         parts = args.split(maxsplit=1)
         action = parts[0].lower()
         tail = parts[1].strip() if len(parts) == 2 else ""
@@ -475,7 +476,7 @@ class ReminderPlugin(Star):
         reminder_id = await self.store.add(record, self.limit)
         message = f"⏰ 提醒已设置 #{reminder_id}\n时间：{describe(record['remind_at'], parsed.repeat, self.timezone)}\n时区：{self.timezone}\n内容：{parsed.content}"
         if target != user:
-            message += f"\n提醒对象：{target_name or target}"
+            message += f"\n提醒对象：{target_name or '你选中的群成员'}"
         else:
             message += "\n提醒对象：你自己"
         if event.get_platform_name() in OFFICIAL:
@@ -503,7 +504,7 @@ class ReminderPlugin(Star):
         )
         text = f"#{rem['id']} [{status}] {describe(rem['remind_at'], rem['repeat_type'], rem['timezone'])}\n{content}"
         if rem["target_id"] != rem["creator_id"]:
-            text += f"\n对象：{rem['target_name'] or rem['target_id']}"
+            text += f"\n对象：{rem['target_name'] or '你选中的群成员'}"
         if detail:
             text += f"\n创建者：{rem['creator_name'] or rem['creator_id']}\n时区：{rem['timezone']}\n失败次数：{rem['failure_count']}"
         if rem["last_error"]:
@@ -636,9 +637,7 @@ class ReminderPlugin(Star):
             await self.initialize()
             await self._remember_incoming(event)
             if event.get_group_id():
-                await self.store.observe(
-                    self._scope(event), str(event.get_sender_id()), event.get_sender_name()
-                )
+                await observe_members(event, self.store, self._scope(event))
         except Exception:
             logger.exception("[Reminder] 记录本群成员标识失败")
 

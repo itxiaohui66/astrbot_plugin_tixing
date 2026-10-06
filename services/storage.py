@@ -64,6 +64,13 @@ class ReminderStore:
                     nickname TEXT NOT NULL DEFAULT '', seen_at REAL NOT NULL,
                     PRIMARY KEY(scope, user_id)
                 );
+                CREATE TABLE IF NOT EXISTS member_names (
+                    scope TEXT NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL,
+                    PRIMARY KEY(scope, user_id, name)
+                );
+                CREATE INDEX IF NOT EXISTS member_names_lookup ON member_names(scope, name);
+                INSERT OR IGNORE INTO member_names
+                    SELECT scope,user_id,nickname FROM members WHERE nickname!='';
                 CREATE TABLE IF NOT EXISTS reply_contexts (
                     platform_id TEXT NOT NULL, scene TEXT NOT NULL, destination TEXT NOT NULL,
                     msg_id TEXT NOT NULL, received_at REAL NOT NULL,
@@ -178,29 +185,56 @@ class ReminderStore:
             )
         )
 
-    async def observe(self, scope, user_id, nickname=""):
-        await self._run(
-            lambda db: (
+    async def observe(self, scope, user_id, nickname="", names=()):
+        await self.observe_members(scope, [(user_id, nickname, names)])
+
+    async def observe_members(self, scope, members):
+        def write(db):
+            for user_id, nickname, names in members:
+                if nickname == user_id:
+                    nickname = ""
+                names = list(dict.fromkeys(n for n in (nickname, *names) if n and n != user_id))
                 db.execute(
                     "INSERT INTO members VALUES (?,?,?,?) ON CONFLICT(scope,user_id) DO UPDATE SET "
                     "nickname=CASE WHEN excluded.nickname!='' THEN excluded.nickname ELSE members.nickname END, "
                     "seen_at=excluded.seen_at",
                     (scope, user_id, nickname or "", time.time()),
-                ).rowcount
-            )
+                )
+                if names:
+                    # Keep current names, rather than matching a nickname after a rename.
+                    db.execute(
+                        "DELETE FROM member_names WHERE scope=? AND user_id=?", (scope, user_id)
+                    )
+                    db.executemany(
+                        "INSERT INTO member_names VALUES (?,?,?)",
+                        [(scope, user_id, name) for name in names],
+                    )
+
+        await self._run(write)
+
+    async def member_names(self, scope):
+        return await self._run(
+            lambda db: [
+                r[0]
+                for r in db.execute(
+                    "SELECT DISTINCT name FROM member_names WHERE scope=?", (scope,)
+                )
+            ]
         )
 
     async def member(self, scope, value):
         def read(db):
             rows = db.execute(
-                "SELECT * FROM members WHERE scope=? AND (user_id=? OR nickname=?)",
+                "SELECT DISTINCT m.* FROM members m LEFT JOIN member_names n "
+                "ON m.scope=n.scope AND m.user_id=n.user_id "
+                "WHERE m.scope=? AND (m.user_id=? OR n.name=?)",
                 (scope, value, value),
             ).fetchall()
             exact = [r for r in rows if r["user_id"] == value]
             if exact:
                 return dict(exact[0])
             if len(rows) > 1:
-                raise ValueError("本群有重名用户，请使用真实 @ 或 /tx identity 获取的用户标识。")
+                raise ValueError("本群有重名用户，请在 QQ 的 @ 群成员列表中选中对方后发送。")
             return dict(rows[0]) if rows else None
 
         return await self._run(read)
