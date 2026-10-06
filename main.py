@@ -24,6 +24,7 @@ from .services.delivery import (
     reply_unavailable,
     route,
 )
+from .services.diagnostics import VERSION, diagnose, identity
 from .services.permissions import NOTICE, PermissionBridge
 from .services.storage import ReminderStore, scope_key
 from .services.targets import MARKUP, observe_members, resolve_target
@@ -45,6 +46,8 @@ HELP = """⏰ 栗子提醒
 /tx retry 编号 恢复投递失败的提醒
 /tx identity 查看当前平台、群和用户标识
 /tx status 查看提醒调度器状态
+/tx diagnose 时间 内容 @对方 检查成员识别（不创建提醒）
+/tx diagnose 编号 核对提醒保存的成员 ID
 /tx permission 查看主动消息权限说明
 /tx permission check 发送主动消息验证权限
 /cxzd 管理员重启提醒调度器
@@ -255,6 +258,14 @@ class ReminderPlugin(Star):
                     raise
 
     async def _fire(self, platform, rem, reply=None):
+        logger.info(
+            "[Reminder] 投递 #%s（%s）：创建者=%s，目标=%s，目标昵称=%s",
+            rem["id"],
+            VERSION,
+            identity(rem["creator_id"]),
+            identity(rem["target_id"]),
+            rem["target_name"],
+        )
         try:
             await asyncio.wait_for(
                 deliver(
@@ -436,6 +447,26 @@ class ReminderPlugin(Star):
                 f"平台：{event.get_platform_id()}\n群标识：{event.get_group_id() or '私聊'}\n用户标识：{user}\n本群管理员授权标识：{event.get_platform_id()}|{event.get_group_id()}|{user}",
             )
             return
+        if action in {"diagnose", "诊断"}:
+            if tail.isdecimal():
+                rem = await self.store.get(int(tail), scope)
+                if not rem or (rem["creator_id"] != user and not self._admin(event)):
+                    raise ValueError("当前会话中找不到该提醒，或你没有查看权限。")
+                await self._reply(
+                    event,
+                    f"提醒投递诊断（{VERSION}，不会创建或发送提醒）\n"
+                    f"提醒：#{rem['id']}\n创建者：{rem['creator_name']} / {identity(rem['creator_id'])}\n"
+                    f"保存对象：{rem['target_name']} / {identity(rem['target_id'])}\n"
+                    f"发起人与对象 ID 相同：{'是' if rem['creator_id'] == rem['target_id'] else '否'}\n"
+                    f"到期 @ 使用：{identity(rem['target_id'])}\n状态：{rem['status']}\n"
+                    "请将本条与成员识别 diagnose 回复一起提供，核对创建与投递两端。",
+                )
+                return
+            await self._reply(
+                event,
+                "成员识别诊断（不会创建提醒）\n" + await diagnose(event, tail, self.store, scope),
+            )
+            return
         if action in {"status", "状态"}:
             reminders = await self.store.list(scope, None if self._admin(event) else user)
             running = self._scheduler is not None and not self._scheduler.done()
@@ -446,7 +477,7 @@ class ReminderPlugin(Star):
             )
             await self._reply(
                 event,
-                f"调度器：{'运行中' if running else '停止'}\n当前会话活跃提醒：{len(reminders)}\n扫描间隔：{self.interval} 秒\n时区：{self.timezone}\n最近扫描：{last}\n官方发送方式：{self.delivery_mode}"
+                f"插件版本：{VERSION}\n调度器：{'运行中' if running else '停止'}\n当前会话活跃提醒：{len(reminders)}\n扫描间隔：{self.interval} 秒\n时区：{self.timezone}\n最近扫描：{last}\n官方发送方式：{self.delivery_mode}"
                 + (f"\n扫描错误：{self.last_scan_error}" if self.last_scan_error else ""),
             )
             return

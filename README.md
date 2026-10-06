@@ -12,7 +12,7 @@
 https://github.com/itxiaohui66/astrbot_plugin_tixing
 ```
 
-也可以从 [GitHub Releases](https://github.com/itxiaohui66/astrbot_plugin_tixing/releases/latest) 下载 `astrbot_plugin_tixing-v1.3.0.zip`，在插件页上传安装。手动安装时，把 ZIP 中的 `astrbot_plugin_tixing` 文件夹解压到 AstrBot 的 `data/plugins/` 下，然后重启或重载插件。运行文件 `main.py`、`metadata.yaml` 和 `_conf_schema.json` 必须直接位于该插件文件夹中。
+也可以从 [GitHub Releases](https://github.com/itxiaohui66/astrbot_plugin_tixing/releases/latest) 下载 `astrbot_plugin_tixing-v1.3.1.zip`，在插件页上传安装。手动安装时，把 ZIP 中的 `astrbot_plugin_tixing` 文件夹解压到 AstrBot 的 `data/plugins/` 下，然后重启或重载插件。运行文件 `main.py`、`metadata.yaml` 和 `_conf_schema.json` 必须直接位于该插件文件夹中。
 
 安装时 AstrBot 会读取 `requirements.txt` 安装 `tzdata`。配置默认采用北京时间 `Asia/Shanghai`；每人在每个群或私聊最多 10 个活跃提醒，每 30 秒扫描一次。确认机器人已经接入 QQ 官方适配器，群内使用 `@机器人 /tx help` 查看帮助。
 
@@ -95,6 +95,12 @@ v1.2.2 修复 SDK 的非空 `mentions` 列表丢失成员字段时覆盖完整�
 机器人从实际 @ 的消息段、原始正文和 mentions 自动读取并保存对方的本群 ID，到期用 QQ 原生 @ 提醒对方。用户看到的是名字，ID 由插件内部处理。QQ 未提供昵称时，创建确认显示“你选中的群成员”，不把长串 ID 当作人名。
 
 v1.3.0 会从机器人收到的成员消息和真实 @ 中学习用户名、群名片及昵称，按平台和群保存，重启后仍可使用。已识别成员也支持直接输入 `@小明`；带空格的名字支持 `@"小 明"` 或 `@小 明`（后者需名字已被识别）。同名时请从 QQ 的 @ 列表选择具体成员，实际选择优先于昵称缓存。收到新名字时更新记录，不继续按旧昵称匹配。
+
+v1.3.1 修复昵称紧挨中文正文（`开会@小明`）、全角 `＠` 和昵称位于命令前（`@小明 /tx 1分钟 开会`）时漏掉对象的情况；未知昵称仍明确拒绝创建，不会改成提醒自己。邮件地址如 `test@example.com` 保留在正文中。到期消息不再给普通括号和提醒编号添加多余反斜杠，例如 `小慧(代码版)`、`（提醒 #14）`。
+
+若成员识别仍失败，先 `/tx status` 确认已加载的插件版本，再发送 `@机器人 /tx diagnose 1分钟 测试 @小明`（照正常方式 @ 对方）。诊断不会创建提醒；会返回 AstrBot 正文、QQ 原始正文、两层 mentions、At 消息段和解析结果。ID 转为一致的哈希标记，仅显示选定的成员字段，不输出 token 或整个 SDK 对象。把诊断回复及失败的完整命令提供给维护者，可确认是平台未下发成员信息、适配器丢字段还是解析问题。
+
+“显示对象名字正确，但实际 @ 发起人”时，还可 `/tx diagnose 提醒编号` 查看该任务保存的创建者与接收者标记，以及到期 @ 所用标记。此操作受创建者/管理员权限及群隔离限制，不发送提醒。实际投递前日志记录相同的标记，供核对创建、数据库和发送三处的 ID。接口成功不代表已经验证了 QQ 客户端最终 @ 的成员；需要实际事件数据定位映射问题。
 
 仅手打一个机器人从未收到过的昵称时，插件无法凭空获得该成员 ID；请从 QQ 的 @ 列表选择对方。若平台连实际 @ 的成员信息也没有下发，可让对方先在本群 `@机器人` 发一条消息；平台提供昵称后即可按昵称匹配。解析失败会明确提示“未创建提醒”，不会退回提醒发起人，也不会要求复制 OpenID。官方群事件的基础字段及其成员标识见 [腾讯事件文档](https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/event.md)。
 

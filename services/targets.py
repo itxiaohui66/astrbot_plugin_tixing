@@ -107,7 +107,7 @@ def text_mentions(names):
     # reminder text after a shorter name. Quoted names work before registration.
     known = "|".join(re.escape(n) for n in sorted(set(names), key=len, reverse=True) if n)
     pattern = re.compile(
-        r'(?<![\w@])@(?:"([^"\n]+)"|“([^”\n]+)”|'
+        r'(?<![A-Za-z0-9_.@＠])[@＠](?:"([^"\n]+)"|“([^”\n]+)”|'
         + (rf"({known})(?=\s|$)|" if known else "")
         + r"([^\s@]+))"
     )
@@ -131,6 +131,12 @@ async def resolve_target(event, args, store, scope):
         known_names + [n for values in names.values() for n in values] + list(bot_names)
     )
     textual = list(pattern.finditer(args))
+    # A QQ mention can precede the command. Without native mention metadata,
+    # tx()'s argument slicing previously discarded this explicit recipient.
+    command = re.search(r"(?:^|\s)/?(?:tx|提醒|remind)(?=\s|$)", event.message_str, re.I)
+    if command:
+        prefix = MARKUP.sub(" ", event.message_str[: command.start()])
+        textual.extend(pattern.finditer(prefix))
     for match in textual:
         value = next(g for g in match.groups() if g is not None)
         if value in bot_names or aliases.get(value, value) in bot_ids:

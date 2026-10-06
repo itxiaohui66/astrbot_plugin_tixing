@@ -137,9 +137,11 @@ def official_mention(user_id):
 
 def reminder_markdown(rem):
     # Keep the mention outside user-provided text/code blocks. Preserve reminder
-    # text literally instead of interpreting its punctuation as Markdown syntax.
+    # text literally instead of interpreting formatting delimiters as Markdown.
+    # QQ exposes unnecessary backslashes before ordinary parentheses and the
+    # inline reminder number, so do not escape every CommonMark punctuation mark.
     text = escape(reminder_text(rem), quote=False)
-    text = re.sub(r"([\\`*_{}\[\]()#+.!|~\-])", r"\\\1", text)
+    text = re.sub(r"([\\`*_{}\[\]|~])", r"\\\1", text)
     return official_mention(rem["target_id"]) + "\n\n" + text.replace("\n", "\n\n")
 
 

@@ -57,7 +57,7 @@ async def test_self_reminder_has_one_native_mention_without_visible_id(platform_
     platform = platform_factory()
     await deliver(platform, rem)
     sent = platform.get_client().api.post_group_message.call_args.kwargs["markdown"]["content"]
-    assert sent == '<qqbot-at-user id="MEMBER_OPENID" />\n\n⏰ 吃饭\n\n（提醒 \\#1）'
+    assert sent == '<qqbot-at-user id="MEMBER_OPENID" />\n\n⏰ 吃饭\n\n（提醒 #1）'
 
 
 @pytest.mark.parametrize("sdk_object", [False, True])
@@ -132,7 +132,7 @@ async def test_approved_template_keeps_native_mention_and_reply_context(platform
         "params": [
             {
                 "key": "body",
-                "values": ['<qqbot-at-user id="user_1" />\n\n⏰ 吃饭\n\n（提醒 \\#1）'],
+                "values": ['<qqbot-at-user id="user_1" />\n\n⏰ 吃饭\n\n（提醒 #1）'],
             }
         ],
     }
@@ -146,7 +146,14 @@ def test_markdown_preserves_literal_content_and_keeps_mention_outside_code():
     assert body.startswith('<qqbot-at-user id="user_1" />\n\n')
     assert "\\`\\`\\`" in body and "\\*\\*测试\\*\\*" in body
     assert "<qqbot-at-everyone" not in body
-    assert "&lt;qqbot\\-at\\-everyone /&gt;" in body
+    assert "&lt;qqbot-at-everyone /&gt;" in body
+
+
+def test_reported_display_name_and_reminder_number_have_no_added_backslashes():
+    body = reminder_markdown({**record(creator_name="小慧(代码版)", target_id="xh"), "id": 14})
+    assert body.startswith('<qqbot-at-user id="xh" />')
+    assert "来自 小慧(代码版) 的提醒" in body and "（提醒 #14）" in body
+    assert "\\(" not in body and "\\#" not in body
 
 
 async def test_md_rejection_never_falls_back_to_literal_tag(platform_factory):

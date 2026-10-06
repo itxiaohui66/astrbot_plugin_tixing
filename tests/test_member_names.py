@@ -165,3 +165,47 @@ async def test_at_component_name_is_learned(plugin, event_factory):
     event.messages = [SimpleNamespace(qq="target_member", name="小明", type="At")]
     await observe_members(event, instance.store, record()["scope"])
     assert (await instance.store.member(record()["scope"], "小明"))["user_id"] == "target_member"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/tx 1分钟 开会@小明",
+        "/tx 1分钟 开会＠小明",
+        "@小明 /tx 1分钟 开会",
+        "@小明 /提醒 1分钟 开会",
+        "@小明 /remind 1分钟 开会",
+    ],
+)
+async def test_adjacent_and_before_command_nicknames_are_recipients(plugin, event_factory, text):
+    instance, platform = plugin
+    await instance.store.observe(record()["scope"], "target_member", "小明")
+    event = event_factory(text)
+    await instance.tx(event)
+    rem = (await instance.store.list(record()["scope"]))[0]
+    assert rem["target_id"] == "target_member" and rem["content"] == "开会"
+    await instance.store._run(
+        lambda db: db.execute(
+            "UPDATE reminders SET remind_at=? WHERE id=?", (time.time() - 1, rem["id"])
+        )
+    )
+    await instance._check_due()
+    body = platform.get_client().api.post_group_message.call_args.kwargs["markdown"]["content"]
+    assert body.startswith('<qqbot-at-user id="target_member" />') and 'id="user_1"' not in body
+
+
+async def test_adjacent_unknown_nickname_is_not_silently_self(plugin, event_factory):
+    instance, _ = plugin
+    event = event_factory("/tx 1分钟 开会@陌生人")
+    await instance.tx(event)
+    assert "未创建提醒" in event.replies[0]
+    assert not await instance.store.list(record()["scope"])
+
+
+async def test_email_in_reminder_content_is_not_a_recipient(plugin, event_factory):
+    instance, _ = plugin
+    event = event_factory("/tx 1分钟 给 test@example.com 发邮件")
+    await instance.tx(event)
+    rem = (await instance.store.list(record()["scope"]))[0]
+    assert rem["target_id"] == rem["creator_id"]
+    assert rem["content"] == "给 test@example.com 发邮件"
