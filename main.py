@@ -27,12 +27,20 @@ from .services.delivery import (
 from .services.diagnostics import VERSION, diagnose, identity
 from .services.permissions import NOTICE, PermissionBridge
 from .services.storage import ReminderStore, scope_key
-from .services.targets import MARKUP, observe_members, resolve_target
+from .services.targets import (
+    command_args,
+    named_recipient,
+    observe_members,
+    registration_name,
+    resolve_target,
+)
 from .services.time_parser import describe, next_occurrence, parse_time
 
 HELP = """⏰ 栗子提醒
 /tx 30分钟 开会（也支持分钟后、小时、天、min/h/d）
 /tx 1小时 开会 @某人
+/tx to xh 1分钟 测试（直接写名字，不用 @ 对方或填写 ID）
+/tx name xh 登记自己的提醒昵称（对方在本群登记一次即可）
 /tx 10:00 开会（今天）
 /tx 明天10:00 开会
 /tx 2026-12-31 20:00 跨年
@@ -53,8 +61,9 @@ HELP = """⏰ 栗子提醒
 /cxzd 管理员重启提醒调度器
 命令别名：/提醒、/remind
 群内官方 QQ 需要 @机器人；时间按配置时区计算。
-提醒他人：输入 @ 后从 QQ 群成员列表选中对方，机器人自动识别，无需填 ID。
-已识别的本群成员也支持 @昵称；昵称带空格可用 @"小 明"。
+QQ 有时不下发被 @ 成员的 ID，请优先 /tx to 昵称 时间 内容。
+机器人从成员发言学习 ID；未认识的成员可自己 /tx name 昵称 登记，无需复制 ID。
+平台提供完整真实 @ 时也支持；昵称带空格可用 /tx to "小 明" 1分钟 测试。
 默认到点主动提醒；群主/管理员需开启“允许机器人主动发送消息”。
 管理员可 /tx list all 和 /tx cancel 编号 管理当前群提醒。"""
 
@@ -391,16 +400,7 @@ class ReminderPlugin(Star):
     @filter.command("tx", alias={"提醒", "remind"})
     async def tx(self, event: AstrMessageEvent):
         """设置、查看、取消单次或循环提醒。"""
-        # Raw text preserves spaces/newlines in reminder content. Remove only the bot mention.
-        text = event.message_str
-        bot_id = str(event.message_obj.self_id)
-        text = MARKUP.sub(
-            lambda m: " " if next(g for g in m.groups() if g is not None) == bot_id else m.group(0),
-            text,
-        )
-        match = re.search(r"(?:^|\s)/?(?:tx|提醒|remind)(?=\s|$)", text, re.I)
-        args = text[match.end() :].strip() if match else ""
-        await self._guard(event, lambda: self._command(event, args))
+        await self._guard(event, lambda: self._command(event, command_args(event)))
 
     async def _command(self, event, args):
         if not args or args.lower() in {"help", "帮助"}:
@@ -414,6 +414,23 @@ class ReminderPlugin(Star):
         parts = args.split(maxsplit=1)
         action = parts[0].lower()
         tail = parts[1].strip() if len(parts) == 2 else ""
+        if action in {"name", "昵称", "登记"}:
+            if not event.get_group_id():
+                raise ValueError("请在需要使用提醒的群内登记昵称，私聊记录不能用于群聊。")
+            if not tail:
+                name = await self.store.registered_name(scope, user)
+                await self._reply(
+                    event, f"你的提醒昵称：{name or '尚未登记'}\n用法：/tx name xh（仅登记自己）"
+                )
+                return
+            name = registration_name(tail)
+            await self.store.register_name(scope, user, name)
+            quoted = f'"{name}"' if any(c.isspace() for c in name) else name
+            await self._reply(
+                event,
+                f"✅ 已将提醒昵称“{name}”登记给你自己。\n其他人可发送 /tx to {quoted} 1分钟 测试 提醒你，无需填写 ID。",
+            )
+            return
         if action in {"list", "列表", "查看", "history", "历史"}:
             await self._list(event, scope, user, tail, action in {"history", "历史"})
             return
@@ -481,7 +498,12 @@ class ReminderPlugin(Star):
                 + (f"\n扫描错误：{self.last_scan_error}" if self.last_scan_error else ""),
             )
             return
-        args, target, target_name = await resolve_target(event, args, self.store, scope)
+        explicit_name = None
+        if action in {"to", "给", "提醒他人"}:
+            explicit_name, args = named_recipient(tail)
+        args, target, target_name = await resolve_target(
+            event, args, self.store, scope, explicit_name
+        )
         parsed = parse_time(args, datetime.now(self.tz))
         if len(parsed.content) > self.max_content:
             raise ValueError(f"提醒内容最多 {self.max_content} 个字符。")
@@ -510,11 +532,23 @@ class ReminderPlugin(Star):
             message += f"\n提醒对象：{target_name or '你选中的群成员'}"
         else:
             message += "\n提醒对象：你自己"
+            if (
+                explicit_name is None
+                and event.get_platform_name() in OFFICIAL
+                and event.get_group_id()
+            ):
+                message += f"\n本次未识别到其他成员。若要提醒他人，请 /tx cancel {reminder_id} 后改用 /tx to 昵称 时间 内容；QQ 可能未下发实际 @ 的成员信息。"
         if event.get_platform_name() in OFFICIAL:
             if self.delivery_mode == "passive":
                 message += "\n使用被动回复：到期有有效回复窗口时发送，否则等待下次 @机器人 补发。"
             else:
                 message += "\n到点主动提醒；权限受限时保留任务，等待开启权限后补发。"
+                if scene == "group":
+                    permission = await self.store.permission(
+                        str(event.get_platform_id()), destination
+                    )
+                    if permission["state"] in {"error", "denied", "removed"}:
+                        message += "\n⚠️ 当前已检测到主动发送受限，请群主/管理员开启权限后 /tx permission check 验证；否则到期仍无法发送。"
         await self._reply(event, message)
 
     def _format(self, rem, detail=False):

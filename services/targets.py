@@ -8,6 +8,47 @@ MARKUP = re.compile(
     r"<qqbot-at-user\s+id=[\"\']([^\"\']+)[\"\']\s*/>|<@!?([^>]+)>|\[CQ:at,qq=([^,\]]+)[^\]]*\]"
 )
 VALID_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+COMMAND = re.compile(r"(?:^|\s)/?(?:tx|提醒|remind)(?=\s|$)", re.I)
+
+
+def message_text(event):
+    """Prefer the original command when AstrBot has removed a textual mention."""
+    if event.get_platform_name() in OFFICIAL:
+        raw = event.message_obj.raw_message
+        data = field(raw, "raw_data", raw)
+        content = field(data, "content") or field(raw, "content", "") or ""
+        if isinstance(content, str) and COMMAND.search(content):
+            return content
+    return event.message_str
+
+
+def command_args(event):
+    text = message_text(event)
+    _, _, _, bot_ids, *_ = mention_data(event)
+    text = MARKUP.sub(
+        lambda m: " " if next(g for g in m.groups() if g is not None) in bot_ids else m.group(0),
+        text,
+    )
+    command = COMMAND.search(text)
+    return text[command.end() :].strip() if command else ""
+
+
+def named_recipient(text):
+    match = re.fullmatch(r'(?:"([^"\n]+)"|“([^”\n]+)”|(\S+))\s+(.+)', text, re.S)
+    if not match:
+        raise ValueError('用法：/tx to xh 1分钟 测试；名字带空格用 /tx to "小 明" 1分钟 测试。')
+    return next(g for g in match.groups()[:3] if g is not None), match.group(4).strip()
+
+
+def registration_name(text):
+    name = text.strip()
+    if len(name) >= 2 and (name[0], name[-1]) in {('"', '"'), ("“", "”")}:
+        name = name[1:-1].strip()
+    if not name or len(name) > 64 or any(ord(c) < 32 or c in "@＠<>[]" for c in name):
+        raise ValueError("提醒昵称需要 1–64 个字符，不要加 @ 或填入 @ 标签。")
+    if name in {"all", "everyone", "全体成员"}:
+        raise ValueError("不能使用全体成员作为提醒昵称。")
+    return name
 
 
 def member_names(member):
@@ -114,7 +155,7 @@ def text_mentions(names):
     return pattern
 
 
-async def resolve_target(event, args, store, scope):
+async def resolve_target(event, args, store, scope, explicit_name=None):
     sender = str(event.get_sender_id())
     trusted, names, aliases, bot_ids, bot_names, payload_mentions, sdk_mentions = mention_data(
         event
@@ -133,13 +174,19 @@ async def resolve_target(event, args, store, scope):
     textual = list(pattern.finditer(args))
     # A QQ mention can precede the command. Without native mention metadata,
     # tx()'s argument slicing previously discarded this explicit recipient.
-    command = re.search(r"(?:^|\s)/?(?:tx|提醒|remind)(?=\s|$)", event.message_str, re.I)
+    text = message_text(event)
+    command = COMMAND.search(text)
     if command:
-        prefix = MARKUP.sub(" ", event.message_str[: command.start()])
+        prefix = MARKUP.sub(" ", text[: command.start()])
         textual.extend(pattern.finditer(prefix))
-    for match in textual:
-        value = next(g for g in match.groups() if g is not None)
+    values = [next(g for g in match.groups() if g is not None) for match in textual]
+    if explicit_name is not None:
+        values.append(explicit_name)
+    selected_name = ""
+    for value in values:
         if value in bot_names or aliases.get(value, value) in bot_ids:
+            if value == explicit_name:
+                raise ValueError("提醒对象不能是机器人，请填写本群成员的提醒昵称。")
             continue
         # @all must not be allowed as a recipient.
         if value in {"all", "everyone", "全体成员"}:
@@ -155,13 +202,17 @@ async def resolve_target(event, args, store, scope):
             and aliases.get(value, value) not in trusted
             and event.get_platform_name() in OFFICIAL
         ):
+            quoted = f'"{value}"' if any(c.isspace() for c in value) else value
             raise ValueError(
-                f"还未识别本群成员“{value}”，未创建提醒。请输入 @ 后从 QQ 群成员列表中选中对方；"
-                "也可以让对方先在本群 @机器人发一条消息，再用 @昵称。无需填写 OpenID。"
+                f"还未识别本群成员“{value}”，未创建提醒。"
+                f"QQ 没有提供这个名字对应的成员 ID。请让对方在本群发送 @机器人 /tx name {quoted} "
+                f"登记自己，然后使用 /tx to {quoted} 1分钟 测试。无需复制 ID。"
             )
         candidates.append(
             matching[0] if matching else member["user_id"] if member else aliases.get(value, value)
         )
+        if member and value != member["user_id"]:
+            selected_name = value
     args = pattern.sub(" ", args).strip()
     candidates = list(dict.fromkeys(candidates))
     if not candidates:
@@ -188,7 +239,7 @@ async def resolve_target(event, args, store, scope):
         if unknown or (not payload_mentions and sdk_unknown and len(sdk_mentions) > 1):
             raise ValueError(
                 "收到 @ 成员信息，但无法识别提醒对象，未创建提醒。"
-                "请输入 @ 后从 QQ 群成员列表中选中对方，或让对方先 @机器人发一条消息再用 @昵称。"
+                "QQ 没有提供完整成员标识。可让对方 /tx name 昵称 登记自己，再 /tx to 昵称 时间 内容。"
             )
     if len(candidates) > 1:
         raise ValueError("一次提醒只能指定一个成员。")
@@ -202,8 +253,8 @@ async def resolve_target(event, args, store, scope):
         if event.get_platform_name() in OFFICIAL:
             if target not in trusted and not member:
                 raise ValueError(
-                    "无法识别本群提醒对象，未创建提醒。请输入 @ 后从 QQ 群成员列表中选中对方，"
-                    "或让对方先 @机器人发一条消息再用 @昵称。无需填写 OpenID。"
+                    "无法识别本群提醒对象，未创建提醒。请让对方 /tx name 昵称 登记自己，"
+                    "再使用 /tx to 昵称 时间 内容。无需复制 ID。"
                 )
         elif event.get_platform_name() == "aiocqhttp":
             try:
@@ -212,7 +263,7 @@ async def resolve_target(event, args, store, scope):
                 )
             except Exception as exc:
                 raise ValueError("无法在本群找到该成员，请重新 @ 群成员。") from exc
-    name = trusted.get(target) or (member["nickname"] if member else "")
+    name = selected_name or trusted.get(target) or (member["nickname"] if member else "")
     if target == sender:
         name = event.get_sender_name() or ""
     return args, target, name

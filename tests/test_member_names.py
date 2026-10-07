@@ -108,7 +108,7 @@ async def test_unknown_or_cross_group_nickname_never_creates_self_reminder(plugi
     await instance.store.observe("another_scope", "target_member", "小明")
     event = event_factory("/tx 1分钟 开会 @小明")
     await instance.tx(event)
-    assert "未创建提醒" in event.replies[0] and "群成员列表" in event.replies[0]
+    assert "未创建提醒" in event.replies[0] and "/tx name" in event.replies[0]
     assert "/tx identity" not in event.replies[0]
     assert not await instance.store.list(record()["scope"])
 

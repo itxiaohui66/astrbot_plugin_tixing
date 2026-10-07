@@ -69,6 +69,10 @@ class ReminderStore:
                     PRIMARY KEY(scope, user_id, name)
                 );
                 CREATE INDEX IF NOT EXISTS member_names_lookup ON member_names(scope, name);
+                CREATE TABLE IF NOT EXISTS member_aliases (
+                    scope TEXT NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL,
+                    PRIMARY KEY(scope, user_id), UNIQUE(scope, name)
+                );
                 INSERT OR IGNORE INTO member_names
                     SELECT scope,user_id,nickname FROM members WHERE nickname!='';
                 CREATE TABLE IF NOT EXISTS reply_contexts (
@@ -217,7 +221,9 @@ class ReminderStore:
             lambda db: [
                 r[0]
                 for r in db.execute(
-                    "SELECT DISTINCT name FROM member_names WHERE scope=?", (scope,)
+                    "SELECT name FROM member_names WHERE scope=? UNION "
+                    "SELECT name FROM member_aliases WHERE scope=?",
+                    (scope, scope),
                 )
             ]
         )
@@ -227,15 +233,46 @@ class ReminderStore:
             rows = db.execute(
                 "SELECT DISTINCT m.* FROM members m LEFT JOIN member_names n "
                 "ON m.scope=n.scope AND m.user_id=n.user_id "
-                "WHERE m.scope=? AND (m.user_id=? OR n.name=?)",
-                (scope, value, value),
+                "LEFT JOIN member_aliases a ON m.scope=a.scope AND m.user_id=a.user_id "
+                "WHERE m.scope=? AND (m.user_id=? OR n.name=? OR a.name=?)",
+                (scope, value, value, value),
             ).fetchall()
             exact = [r for r in rows if r["user_id"] == value]
             if exact:
                 return dict(exact[0])
             if len(rows) > 1:
-                raise ValueError("本群有重名用户，请在 QQ 的 @ 群成员列表中选中对方后发送。")
+                raise ValueError(
+                    "本群有重名用户，请让成员 /tx name 登记不同提醒昵称，或使用平台能识别的真实 @。"
+                )
             return dict(rows[0]) if rows else None
+
+        return await self._run(read)
+
+    async def register_name(self, scope, user_id, name):
+        def write(db):
+            db.execute("BEGIN IMMEDIATE")
+            occupied = db.execute(
+                "SELECT user_id FROM member_names WHERE scope=? AND name=? UNION "
+                "SELECT user_id FROM member_aliases WHERE scope=? AND name=? UNION "
+                "SELECT user_id FROM members WHERE scope=? AND user_id=?",
+                (scope, name, scope, name, scope, name),
+            ).fetchall()
+            if any(row[0] != user_id for row in occupied):
+                raise ValueError("该名字已经对应本群其他成员，请选择一个唯一的提醒昵称。")
+            db.execute(
+                "INSERT INTO member_aliases VALUES (?,?,?) "
+                "ON CONFLICT(scope,user_id) DO UPDATE SET name=excluded.name",
+                (scope, user_id, name),
+            )
+
+        await self._run(write)
+
+    async def registered_name(self, scope, user_id):
+        def read(db):
+            row = db.execute(
+                "SELECT name FROM member_aliases WHERE scope=? AND user_id=?", (scope, user_id)
+            ).fetchone()
+            return row["name"] if row else ""
 
         return await self._run(read)
 

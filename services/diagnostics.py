@@ -4,9 +4,9 @@ import hashlib
 import json
 
 from .delivery import field
-from .targets import MARKUP, mention_data, resolve_target
+from .targets import MARKUP, mention_data, named_recipient, resolve_target
 
-VERSION = "v1.3.1"
+VERSION = "v1.4.0"
 
 
 def identity(value):
@@ -72,7 +72,13 @@ async def diagnose(event, args, store, scope):
         "原始author": member(field(data, "author", {})),
     }
     try:
-        _, target, name = await resolve_target(event, args, store, scope)
+        parts = args.split(maxsplit=1)
+        first = parts[0] if parts else ""
+        tail = parts[1] if len(parts) == 2 else ""
+        explicit_name = None
+        if first in {"to", "给", "提醒他人"}:
+            explicit_name, args = named_recipient(tail)
+        _, target, name = await resolve_target(event, args, store, scope, explicit_name)
         report["解析结果"] = {
             "对象": identity(target),
             "名字": name,

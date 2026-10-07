@@ -128,7 +128,7 @@ async def test_member_and_mentions(tmp_path, event_factory):
         await resolve_target(event, '1小时 <qqbot-at-user id="opaque_new" /> 开会', store, scope)
     )[1] == "opaque_new"
     event.message_obj.raw_message = {"group_openid": "group_1"}
-    with pytest.raises(ValueError, match="OpenID"):
+    with pytest.raises(ValueError, match="未创建提醒"):
         await resolve_target(event, "1小时 开会 @123456789", store, scope)
     await store.observe("other_scope", "unknown", "跨群用户")
     with pytest.raises(ValueError):
